@@ -1,0 +1,13 @@
+What functionality do we want?
+1. Organization
+	a. Team
+	b. Position (handler / cutter) or (o vs d)
+	c. Player
+	d. Game
+	e. Throw type? (huck vs swing etc)
+2. Visualization
+	a. Catch / throw / D hotspots
+	b. Common throws
+3. Misc
+	a. Player lookup
+	b. 
