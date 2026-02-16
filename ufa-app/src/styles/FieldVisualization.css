@@ -1,0 +1,76 @@
+.field-container {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 2rem;
+  margin-bottom: 2rem;
+}
+
+.field-svg {
+  display: block;
+  margin: 0 auto;
+  background: transparent;
+}
+
+.field-legend {
+  display: flex;
+  justify-content: center;
+  gap: 2rem;
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #ccc;
+  font-size: 0.9rem;
+}
+
+.legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.legend-square {
+  width: 12px;
+  height: 12px;
+  background-color: #ef4444;
+  border: 1px solid #fff;
+  display: inline-block;
+}
+
+.selection-info {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background: rgba(102, 126, 234, 0.2);
+  border: 1px solid rgba(102, 126, 234, 0.4);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 0.9rem;
+}
+
+.selection-info .clear-btn {
+  padding: 0.4rem 0.8rem;
+  background: #667eea;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.selection-info .clear-btn:hover {
+  background: #5568d3;
+  transform: scale(1.05);
+}

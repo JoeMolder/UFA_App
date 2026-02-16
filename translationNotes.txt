@@ -1,5 +1,0 @@
-{"turnoverX":3.24,"turnoverY":34.83} goes with {"throwerX":-2.68,"throwerY":80.12}
-
-{"turnoverX":-22.93,"turnoverY":105.16} goes with {"throwerX":23.47,"throwerY":19.25}
-
-X's are basically mirrored, and Y's are something like throwerY = (120 - turnoverY)

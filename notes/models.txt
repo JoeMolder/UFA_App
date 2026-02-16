@@ -1,0 +1,13 @@
+Models
+1. Interactive throwing heatmap, could also be player recepetion predicition
+2. Team start-up plays / dead disc plays / strategy classification
+3. Line/player synergy
+4. Scoring probability
+5. Completion probability (by team, by player, by field position)
+6. Player similarity
+7. Possession generation
+
+Other Ideas:
+Where d’s occur, this could be per player too
+Where d’s are thrown from, "     "
+Where goals are scored / thrown from, "     "

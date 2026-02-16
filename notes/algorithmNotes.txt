@@ -1,0 +1,33 @@
+Okay, here is the deal. There are 4 important tags for this:
+1. 22: Throwaways
+2. 20: Drops
+3. 13: A flag that shows the disc has switched hands
+4. 11: A block
+Note that #Throwaways + #Drops = #SwitchFlags + #Blocks
+
+So, we should have two lists:
+Team1Turns
+Team2Turns
+
+When a 22 shows up in homeEvents, that gets added to Team1Turns, and same happens for a 20. Then if a 13 or 11 shows up in awayEvents, we match them up with the corresponding index in Team1Turns
+
+[{'type': 11, 'defender': 'dmiller2', 'blockX': -24.89, 'blockY': 41.53, 'team': 'rush', 'blockID': 1, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 11, 'defender': 'ostonehou', 'blockX': 1.06, 'blockY': 87.25, 'team': 'rush', 'blockID': 2, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 11, 'defender': 'amuraoka', 'blockX': 23.78, 'blockY': 20.38, 'team': 'rush', 'blockID': 5, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 11, 'defender': 'jmcclean', 'blockX': 15.82, 'blockY': 20.11, 'team': 'rush', 'blockID': 10, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 11, 'defender': 'kjay', 'blockX': -20.49, 'blockY': 19.83, 'team': 'rush', 'blockID': 12, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}] 
+
+[{'type': 22, 'thrower': 'bklar', 'throwerX': 25.08, 'throwerY': 61.37, 'turnoverX': 24.81, 'turnoverY': 106.75, 'wasBlocked': 1, 'team': 'rush', 'throwawayID': 1, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'ostonehou', 'throwerX': 7.44, 'throwerY': 56.91, 'turnoverX': -2.58, 'turnoverY': 110.66, 'wasBlocked': 1, 'team': 'rush', 'throwawayID': 2, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'jmcclean', 'throwerX': 4.83, 'throwerY': 82.03, 'turnoverX': 13.96, 'turnoverY': 76.2, 'wasBlocked': 0, 'team': 'rush', 'throwawayID': 3, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'rcarvalho', 'throwerX': -2.58, 'throwerY': 67.41, 'turnoverX': 6.41, 'turnoverY': 91.02, 'wasBlocked': 0, 'team': 'rush', 'throwawayID': 6, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'ostonehou', 'throwerX': -12.6, 'throwerY': 65.42, 'turnoverX': -12.33, 'turnoverY': 66.38, 'wasBlocked': 0, 'team': 'rush', 'throwawayID': 7, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'aturcotte', 'throwerX': 3.6, 'throwerY': 30.27, 'turnoverX': 5.25, 'turnoverY': 78.81, 'wasBlocked': 0, 'team': 'rush', 'throwawayID': 8, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'ostonehou', 'throwerX': 9.02, 'throwerY': 25.6, 'turnoverX': 26.66, 'turnoverY': 47.98, 'wasBlocked': 0, 'team': 'rush', 'throwawayID': 9, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'amuraoka', 'throwerX': 18.01, 'throwerY': 34.87, 'turnoverX': 21.1, 'turnoverY': 97.34, 'wasBlocked': 1, 'team': 'rush', 'throwawayID': 10, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'dmiller2', 'throwerX': 14.65, 'throwerY': 76.88, 'turnoverX': 13.28, 'turnoverY': 114.09, 'wasBlocked': 0, 'team': 'rush', 'throwawayID': 11, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'lcomire', 'throwerX': -20.49, 'throwerY': 19.83, 'turnoverX': -25.09, 'turnoverY': 43.11, 'wasBlocked': 1, 'team': 'rush', 'throwawayID': 12, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'lcomire', 'throwerX': 19.18, 'throwerY': 59.31, 'turnoverX': 0.78, 'turnoverY': 113.34, 'wasBlocked': 0, 'team': 'rush', 'throwawayID': 13, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}, 
+{'type': 22, 'thrower': 'lcomire', 'throwerX': 5.31, 'throwerY': 100.0, 'turnoverX': 14.92, 'turnoverY': 108.46, 'wasBlocked': 1, 'team': 'rush', 'throwawayID': 14, 'year': 2024, 'gameID': '2024-05-11-MTL-TOR'}]
+
+LOGIC IS STILL OFF, SEEMS LIKE SOMEHOW BLOCKS ARE GETTING PAIRED WITH DROPS
