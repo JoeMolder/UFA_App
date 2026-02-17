@@ -63,6 +63,38 @@ function Home() {
         <p>Ultimate Frisbee Association Data Analysis</p>
       </header>
 
+      <div style={{ marginBottom: '20px' }}>
+        <button
+          onClick={() => navigate('/predict')}
+          style={{
+            padding: '10px 20px',
+            fontSize: '15px',
+            backgroundColor: '#0ea5e9',
+            color: 'white',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer',
+          }}
+        >
+          Throw Prediction Heatmap
+        </button>
+        <button
+          onClick={() => navigate('/embeddings')}
+          style={{
+            padding: '10px 20px',
+            fontSize: '15px',
+            backgroundColor: '#8b5cf6',
+            color: 'white',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            marginLeft: '10px',
+          }}
+        >
+          Player Embeddings
+        </button>
+      </div>
+
       {stats && (
         <div className="stats-summary">
           <h2>Database Summary</h2>

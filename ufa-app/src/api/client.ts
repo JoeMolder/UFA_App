@@ -45,6 +45,42 @@ export interface StatsResponse {
   synthetic_events: number;
 }
 
+export interface PredictionResponse {
+  grid: number[][];
+  extent: [number, number, number, number];
+}
+
+export interface PlayerStats {
+  total_throws: number;
+  completion_pct: number;
+  goal_pct: number;
+  avg_throw_dist: number;
+  avg_throw_depth: number;
+  huck_rate: number;
+  avg_lateral_dist: number;
+  avg_dist_from_center: number;
+}
+
+export interface ClusterSummary {
+  count: number;
+  avg_completion_pct: number;
+  avg_throw_dist: number;
+  avg_throw_depth: number;
+  avg_huck_rate: number;
+  avg_goal_pct: number;
+  avg_total_throws: number;
+  avg_lateral_dist: number;
+  avg_dist_from_center: number;
+}
+
+export interface EmbeddingsResponse {
+  players: string[];
+  coordinates: number[][];
+  clusters: number[];
+  player_stats: Record<string, PlayerStats>;
+  cluster_summaries: Record<string, ClusterSummary>;
+}
+
 // API Functions
 export const api = {
   // Get list of games
@@ -68,6 +104,31 @@ export const api = {
   // Get stats summary
   getStats: async (): Promise<StatsResponse> => {
     const response = await apiClient.get<StatsResponse>('/stats/summary');
+    return response.data;
+  },
+
+  // Get player list for predictions
+  getPlayers: async (): Promise<string[]> => {
+    const response = await apiClient.get<string[]>('/players');
+    return response.data;
+  },
+
+  // Get UMAP player embeddings
+  getEmbeddings: async (): Promise<EmbeddingsResponse> => {
+    const response = await apiClient.get<EmbeddingsResponse>('/embeddings/players');
+    return response.data;
+  },
+
+  // Get throw prediction heatmap
+  predictThrows: async (
+    player: string,
+    x: number,
+    y: number,
+    gridSize = 30
+  ): Promise<PredictionResponse> => {
+    const response = await apiClient.get<PredictionResponse>('/predict/throws', {
+      params: { player, x, y, grid_size: gridSize },
+    });
     return response.data;
   },
 };

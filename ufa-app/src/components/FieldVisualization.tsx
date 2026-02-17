@@ -21,7 +21,7 @@ interface Tooltip {
   y: number
 }
 
-function FieldVisualization({ events, homeTeam, awayTeam }: FieldVisualizationProps) {
+function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }: FieldVisualizationProps) {
   const [selectedPossession, setSelectedPossession] = useState<number | null>(null)
   const [tooltip, setTooltip] = useState<Tooltip | null>(null)
   // Field dimensions based on actual data coordinate system
@@ -31,27 +31,11 @@ function FieldVisualization({ events, homeTeam, awayTeam }: FieldVisualizationPr
   const FIELD_Y_MAX = 120 // Includes endzones
   const ENDZONE_Y = 20 // Endzone depth
 
-  // Determine which team attacks which direction
-  // We'll make the home team attack left-to-right, away team attacks right-to-left
-  const getAttackingDirection = (team: string): 'left-to-right' | 'right-to-left' => {
-    return team === homeTeam ? 'left-to-right' : 'right-to-left'
-  }
-
-  // Flip Y coordinate for teams attacking right-to-left
-  const normalizeY = (y: number, team: string): number => {
-    if (getAttackingDirection(team) === 'right-to-left') {
-      return FIELD_Y_MAX - y
-    }
-    return y
-  }
-
-  // Flip X coordinate for teams attacking right-to-left (field width is mirrored)
-  const normalizeX = (x: number, team: string): number => {
-    if (getAttackingDirection(team) === 'right-to-left') {
-      return -x  // Mirror across center line
-    }
-    return x
-  }
+  // Coordinates are now stored in the same physical frame (normalized at ingestion time).
+  // Home team attacks toward Y=110, away team attacks toward Y=10.
+  // No per-event flipping needed.
+  const normalizeY = (y: number, _team: string): number => y
+  const normalizeX = (x: number, _team: string): number => x
 
   // SVG dimensions (landscape orientation - field displayed sideways)
   const SVG_WIDTH = 900
