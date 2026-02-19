@@ -80,6 +80,21 @@ export interface ClusterSummary {
   avg_dist_from_center: number;
 }
 
+export interface TurnoverHeatmapResponse {
+  throw_grid: number[][];
+  turnover_grid: number[][];
+  total_throws: number;
+  total_turnovers: number;
+  extent: [number, number, number, number];
+}
+
+export interface TurnoverOriginsResponse {
+  grid: number[][];
+  total_throws: number;
+  total_turnovers: number;
+  extent: [number, number, number, number];
+}
+
 export interface EmbeddingsResponse {
   players: string[];
   coordinates: number[][];
@@ -137,6 +152,81 @@ export const api = {
   ): Promise<PredictionResponse> => {
     const response = await apiClient.get<PredictionResponse>('/predict/throws', {
       params: { player, x, y, grid_size: gridSize },
+    });
+    return response.data;
+  },
+
+  // Get turnover prediction heatmap (flow model, no player)
+  predictTurnovers: async (
+    x: number,
+    y: number,
+    gridSize = 30
+  ): Promise<PredictionResponse> => {
+    const response = await apiClient.get<PredictionResponse>('/predict/turnovers', {
+      params: { x, y, grid_size: gridSize },
+    });
+    return response.data;
+  },
+
+  // Get relative density (turnover/completion ratio) prediction
+  predictRelativeDensity: async (
+    x: number,
+    y: number,
+    gridSize = 30
+  ): Promise<PredictionResponse> => {
+    const response = await apiClient.get<PredictionResponse>('/predict/relative-density', {
+      params: { x, y, grid_size: gridSize },
+    });
+    return response.data;
+  },
+
+  // Get turnover origins heatmap (where turnovers are thrown from)
+  getTurnoverOrigins: async (
+    player?: string,
+    gridX = 50,
+    gridY = 60,
+    smooth = 2.0
+  ): Promise<TurnoverOriginsResponse> => {
+    const params: Record<string, string | number> = { grid_x: gridX, grid_y: gridY, smooth };
+    if (player) params.player = player;
+    const response = await apiClient.get<TurnoverOriginsResponse>('/heatmap/turnover-origins', { params });
+    return response.data;
+  },
+
+  // Get turnover heatmap data
+  getTurnoverHeatmap: async (
+    gridX = 50,
+    gridY = 60,
+    smooth = 2.0
+  ): Promise<TurnoverHeatmapResponse> => {
+    const response = await apiClient.get<TurnoverHeatmapResponse>('/heatmap/turnovers', {
+      params: { grid_x: gridX, grid_y: gridY, smooth },
+    });
+    return response.data;
+  },
+
+  // Get batch throwaway destination grids for all thrower positions
+  getThrowawaysBatch: async (
+    throwerGridX = 10,
+    throwerGridY = 24,
+    destGridX = 30,
+    destGridY = 36,
+    radius = 12
+  ): Promise<BatchPredictionResponse> => {
+    const response = await apiClient.get<BatchPredictionResponse>('/heatmap/throwaways/batch', {
+      params: { thrower_grid_x: throwerGridX, thrower_grid_y: throwerGridY, dest_grid_x: destGridX, dest_grid_y: destGridY, radius },
+    });
+    return response.data;
+  },
+
+  // Get block prediction heatmap (flow model, no player)
+  predictBlocks: async (
+    x: number,
+    y: number,
+    gridSize = 30
+  ): Promise<PredictionResponse> => {
+    const response = await apiClient.get<PredictionResponse>('/predict/blocks', {
+      params: { x, y, grid_size: gridSize },
     });
     return response.data;
   },

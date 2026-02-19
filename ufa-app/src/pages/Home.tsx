@@ -106,6 +106,21 @@ function Home() {
         >
           Player Embeddings
         </button>
+        <button
+          onClick={() => navigate('/turnovers')}
+          style={{
+            padding: '10px 20px',
+            fontSize: '15px',
+            backgroundColor: '#ef4444',
+            color: 'white',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            marginLeft: '10px',
+          }}
+        >
+          Turnover Heatmap
+        </button>
       </div>
 
       {stats && (

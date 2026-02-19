@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import os
 from dotenv import load_dotenv
 import numpy as np
@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import joblib
 from pathlib import Path
+from scipy.ndimage import gaussian_filter
 
 from nflows import flows, distributions, transforms
 import umap
@@ -69,6 +70,42 @@ class ContextNetwork(nn.Module):
         return self.network(combined)
 
 
+class TurnoverContextNetwork(nn.Module):
+    """Processes thrower position context (no player embedding)."""
+    def __init__(self, hidden_dim=64, output_dim=32):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, context):
+        return self.network(context)
+
+
+def create_turnover_flow(num_layers=5, hidden_features=128, context_features=32):
+    """Recreate turnover flow architecture for loading weights."""
+    base_dist = distributions.StandardNormal(shape=[2])
+    context_net = TurnoverContextNetwork(hidden_dim=64, output_dim=context_features)
+    transform_list = []
+    for _ in range(num_layers):
+        transform_list.append(
+            transforms.MaskedAffineAutoregressiveTransform(
+                features=2,
+                hidden_features=hidden_features,
+                context_features=context_features,
+                num_blocks=2,
+            )
+        )
+        transform_list.append(transforms.ReversePermutation(features=2))
+    transform = transforms.CompositeTransform(transform_list)
+    flow = flows.Flow(transform, base_dist)
+    return flow, context_net
+
+
 def create_flow(n_players, num_layers=5, hidden_features=128, context_features=32):
     """Recreate flow architecture for loading weights."""
     base_dist = distributions.StandardNormal(shape=[2])
@@ -124,6 +161,76 @@ try:
     print(f"ML model loaded from {MODEL_PATH} ({len(_player_names)} players)")
 except Exception as e:
     print(f"Warning: Could not load ML model: {e}")
+
+# Load turnover flow model
+TURNOVER_MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "turnover_flow_model.pkl"
+
+_turnover_flow = None
+_turnover_context_net = None
+
+try:
+    turnover_save = joblib.load(TURNOVER_MODEL_PATH)
+    turnover_hp = turnover_save["hyperparameters"]
+
+    _turnover_flow, _turnover_context_net = create_turnover_flow(
+        num_layers=turnover_hp["num_layers"],
+        hidden_features=turnover_hp["hidden_features"],
+        context_features=turnover_hp["context_features"],
+    )
+    _turnover_flow.load_state_dict(turnover_save["flow_state_dict"])
+    _turnover_context_net.load_state_dict(turnover_save["context_net_state_dict"])
+    _turnover_flow.eval()
+    _turnover_context_net.eval()
+    print(f"Turnover flow model loaded from {TURNOVER_MODEL_PATH}")
+except Exception as e:
+    print(f"Warning: Could not load turnover flow model: {e}")
+
+# Load block flow model (throwaways preceding blocks)
+BLOCK_MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "block_flow_model.pkl"
+
+_block_flow = None
+_block_context_net = None
+
+try:
+    block_save = joblib.load(BLOCK_MODEL_PATH)
+    block_hp = block_save["hyperparameters"]
+
+    # Same architecture as turnover flow (TurnoverContextNetwork with 2 inputs)
+    _block_flow, _block_context_net = create_turnover_flow(
+        num_layers=block_hp["num_layers"],
+        hidden_features=block_hp["hidden_features"],
+        context_features=block_hp["context_features"],
+    )
+    _block_flow.load_state_dict(block_save["flow_state_dict"])
+    _block_context_net.load_state_dict(block_save["context_net_state_dict"])
+    _block_flow.eval()
+    _block_context_net.eval()
+    print(f"Block flow model loaded from {BLOCK_MODEL_PATH}")
+except Exception as e:
+    print(f"Warning: Could not load block flow model: {e}")
+
+# Load completion flow model (for relative density computation)
+COMPLETION_MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "completion_flow_model.pkl"
+
+_completion_flow = None
+_completion_context_net = None
+
+try:
+    completion_save = joblib.load(COMPLETION_MODEL_PATH)
+    completion_hp = completion_save["hyperparameters"]
+
+    _completion_flow, _completion_context_net = create_turnover_flow(
+        num_layers=completion_hp["num_layers"],
+        hidden_features=completion_hp["hidden_features"],
+        context_features=completion_hp["context_features"],
+    )
+    _completion_flow.load_state_dict(completion_save["flow_state_dict"])
+    _completion_context_net.load_state_dict(completion_save["context_net_state_dict"])
+    _completion_flow.eval()
+    _completion_context_net.eval()
+    print(f"Completion flow model loaded from {COMPLETION_MODEL_PATH}")
+except Exception as e:
+    print(f"Warning: Could not load completion flow model: {e}")
 
 # ---------------------------------------------------------------------------
 # Player Stats, UMAP, and Clustering (stats-based)
@@ -561,6 +668,386 @@ def predict_throws_batch(
         "y_positions": y_positions.tolist(),
         "extent": [-25, 25, 0, 120],
     }
+
+
+@app.get("/predict/turnovers")
+def predict_turnovers(
+    x: float = Query(..., description="Thrower X position (-25 to 25)"),
+    y: float = Query(..., description="Thrower Y position (0 to 120)"),
+    grid_size: int = Query(30, ge=10, le=200, description="Grid resolution"),
+) -> Dict[str, Any]:
+    """Predict turnover destination distribution from a field position."""
+    if _turnover_flow is None or _turnover_context_net is None:
+        raise HTTPException(status_code=503, detail="Turnover model not loaded")
+
+    x_norm = (x + 25) / 50
+    y_norm = y / 120
+
+    context_input = torch.FloatTensor([[x_norm, y_norm]])
+
+    with torch.no_grad():
+        context_features = _turnover_context_net(context_input)
+
+        x_bins = np.linspace(0, 1, grid_size)
+        y_bins = np.linspace(0, 1, int(grid_size * 1.2))
+
+        xx, yy = np.meshgrid(x_bins, y_bins)
+        grid_points = torch.FloatTensor(np.stack([xx.ravel(), yy.ravel()], axis=1))
+
+        context_expanded = context_features.expand(grid_points.shape[0], -1)
+        log_probs = _turnover_flow.log_prob(grid_points, context=context_expanded)
+        probs = torch.exp(log_probs).numpy()
+
+        grid = probs.reshape(len(y_bins), len(x_bins))
+
+    return {
+        "grid": grid.tolist(),
+        "extent": [-25, 25, 0, 120],
+    }
+
+
+@app.get("/predict/relative-density")
+def predict_relative_density(
+    x: float = Query(..., description="Thrower X position (-25 to 25)"),
+    y: float = Query(..., description="Thrower Y position (0 to 120)"),
+    grid_size: int = Query(30, ge=10, le=200, description="Grid resolution"),
+) -> Dict[str, Any]:
+    """Compute turnover/completion density ratio from a field position.
+
+    High values = turnovers land here disproportionately vs completions.
+    """
+    if _turnover_flow is None or _turnover_context_net is None:
+        raise HTTPException(status_code=503, detail="Turnover model not loaded")
+    if _completion_flow is None or _completion_context_net is None:
+        raise HTTPException(status_code=503, detail="Completion model not loaded")
+
+    x_norm = (x + 25) / 50
+    y_norm = y / 120
+    context_input = torch.FloatTensor([[x_norm, y_norm]])
+
+    with torch.no_grad():
+        x_bins = np.linspace(0, 1, grid_size)
+        y_bins = np.linspace(0, 1, int(grid_size * 1.2))
+        xx, yy = np.meshgrid(x_bins, y_bins)
+        grid_points = torch.FloatTensor(np.stack([xx.ravel(), yy.ravel()], axis=1))
+
+        # Turnover density
+        turnover_ctx = _turnover_context_net(context_input)
+        turnover_expanded = turnover_ctx.expand(grid_points.shape[0], -1)
+        turnover_log_probs = _turnover_flow.log_prob(grid_points, context=turnover_expanded)
+        turnover_probs = torch.exp(turnover_log_probs).numpy()
+
+        # Completion density
+        completion_ctx = _completion_context_net(context_input)
+        completion_expanded = completion_ctx.expand(grid_points.shape[0], -1)
+        completion_log_probs = _completion_flow.log_prob(grid_points, context=completion_expanded)
+        completion_probs = torch.exp(completion_log_probs).numpy()
+
+        # Ratio: turnover / completion (with small epsilon to avoid division by zero)
+        epsilon = 1e-8
+        ratio = turnover_probs / (completion_probs + epsilon)
+        grid = ratio.reshape(len(y_bins), len(x_bins))
+
+    return {
+        "grid": grid.tolist(),
+        "extent": [-25, 25, 0, 120],
+    }
+
+
+@app.get("/predict/blocks")
+def predict_blocks(
+    x: float = Query(..., description="Thrower X position (-25 to 25)"),
+    y: float = Query(..., description="Thrower Y position (0 to 120)"),
+    grid_size: int = Query(30, ge=10, le=200, description="Grid resolution"),
+) -> Dict[str, Any]:
+    """Predict block destination distribution from a field position."""
+    if _block_flow is None or _block_context_net is None:
+        raise HTTPException(status_code=503, detail="Block model not loaded")
+
+    x_norm = (x + 25) / 50
+    y_norm = y / 120
+
+    context_input = torch.FloatTensor([[x_norm, y_norm]])
+
+    with torch.no_grad():
+        context_features = _block_context_net(context_input)
+
+        x_bins = np.linspace(0, 1, grid_size)
+        y_bins = np.linspace(0, 1, int(grid_size * 1.2))
+
+        xx, yy = np.meshgrid(x_bins, y_bins)
+        grid_points = torch.FloatTensor(np.stack([xx.ravel(), yy.ravel()], axis=1))
+
+        context_expanded = context_features.expand(grid_points.shape[0], -1)
+        log_probs = _block_flow.log_prob(grid_points, context=context_expanded)
+        probs = torch.exp(log_probs).numpy()
+
+        grid = probs.reshape(len(y_bins), len(x_bins))
+
+    return {
+        "grid": grid.tolist(),
+        "extent": [-25, 25, 0, 120],
+    }
+
+
+@app.get("/heatmap/turnovers")
+def get_turnover_heatmap(
+    grid_x: int = Query(50, ge=10, le=200, description="Grid bins across field width"),
+    grid_y: int = Query(60, ge=10, le=200, description="Grid bins across field length"),
+    smooth: float = Query(2.0, ge=0, le=10, description="Gaussian smoothing sigma"),
+) -> Dict[str, Any]:
+    """Return throw volume and turnover grids for the entire dataset."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # 1. All throw destinations (completions + goals + drops)
+        cur.execute("""
+            SELECT receiver_x, receiver_y
+            FROM events
+            WHERE event_type IN (18, 19, 20)
+              AND receiver_x IS NOT NULL
+              AND receiver_y IS NOT NULL
+        """)
+        throw_rows = cur.fetchall()
+
+        # 2. Turnover destinations: drops + throwaways
+        cur.execute("""
+            SELECT receiver_x AS x, receiver_y AS y FROM events
+            WHERE event_type = 20 AND receiver_x IS NOT NULL AND receiver_y IS NOT NULL
+            UNION ALL
+            SELECT turnover_x AS x, turnover_y AS y FROM events
+            WHERE event_type = 22 AND turnover_x IS NOT NULL AND turnover_y IS NOT NULL
+        """)
+        turnover_rows = cur.fetchall()
+
+        cur.close()
+        conn.close()
+
+        # Bin into grids
+        x_edges = np.linspace(-25, 25, grid_x + 1)
+        y_edges = np.linspace(0, 120, grid_y + 1)
+
+        throw_grid = np.zeros((grid_y, grid_x), dtype=np.float64)
+        for row in throw_rows:
+            xi = np.searchsorted(x_edges, float(row['receiver_x']), side='right') - 1
+            yi = np.searchsorted(y_edges, float(row['receiver_y']), side='right') - 1
+            if 0 <= xi < grid_x and 0 <= yi < grid_y:
+                throw_grid[yi, xi] += 1
+
+        turnover_grid = np.zeros((grid_y, grid_x), dtype=np.float64)
+        for row in turnover_rows:
+            xi = np.searchsorted(x_edges, float(row['x']), side='right') - 1
+            yi = np.searchsorted(y_edges, float(row['y']), side='right') - 1
+            if 0 <= xi < grid_x and 0 <= yi < grid_y:
+                turnover_grid[yi, xi] += 1
+
+        # Optional Gaussian smoothing
+        if smooth > 0:
+            throw_grid = gaussian_filter(throw_grid, sigma=smooth)
+            turnover_grid = gaussian_filter(turnover_grid, sigma=smooth)
+
+        return {
+            "throw_grid": throw_grid.tolist(),
+            "turnover_grid": turnover_grid.tolist(),
+            "total_throws": int(len(throw_rows)),
+            "total_turnovers": int(len(turnover_rows)),
+            "extent": [-25, 25, 0, 120],
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/heatmap/throwaways/batch")
+def get_throwaway_heatmap_batch(
+    thrower_grid_x: int = Query(10, ge=3, le=20, description="Number of thrower positions across width"),
+    thrower_grid_y: int = Query(24, ge=3, le=40, description="Number of thrower positions across length"),
+    dest_grid_x: int = Query(30, ge=5, le=300, description="Destination grid bins (width)"),
+    dest_grid_y: int = Query(36, ge=5, le=300, description="Destination grid bins (length)"),
+    radius: float = Query(12, ge=3, le=40, description="Gaussian kernel radius for thrower weighting"),
+) -> Dict[str, Any]:
+    """Batch compute throwaway destination density grids for all thrower positions.
+
+    Shows where throwaways land (turnover_x/y) given the thrower position.
+    Direction-normalized so all throws attack toward y=110.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Throwaways that are followed by a block (type 11)
+        cur.execute("""
+            SELECT
+                CASE WHEN e.team = g.away_team_id THEN -e.thrower_x ELSE e.thrower_x END as thrower_x,
+                CASE WHEN e.team = g.away_team_id THEN 120 - e.thrower_y ELSE e.thrower_y END as thrower_y,
+                CASE WHEN e.team = g.away_team_id THEN -e.turnover_x ELSE e.turnover_x END as dest_x,
+                CASE WHEN e.team = g.away_team_id THEN 120 - e.turnover_y ELSE e.turnover_y END as dest_y
+            FROM events e
+            JOIN events nxt
+                ON nxt.game_id = e.game_id
+                AND nxt.event_number = e.event_number + 1
+            JOIN games g ON e.game_id = g.game_id
+            WHERE e.event_type = 22
+              AND nxt.event_type = 11
+              AND e.thrower_x IS NOT NULL AND e.thrower_y IS NOT NULL
+              AND e.turnover_x IS NOT NULL AND e.turnover_y IS NOT NULL
+        """)
+        rows = cur.fetchall()
+
+        cur.close()
+        conn.close()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="No throwaway data found")
+
+        # Convert to numpy arrays
+        thrower_xy = np.array([[float(r['thrower_x']), float(r['thrower_y'])] for r in rows])
+        dest_xy = np.array([[float(r['dest_x']), float(r['dest_y'])] for r in rows])
+
+        # Pre-bin destinations
+        x_edges = np.linspace(-25, 25, dest_grid_x + 1)
+        y_edges = np.linspace(0, 120, dest_grid_y + 1)
+        dest_xi = np.clip(np.searchsorted(x_edges, dest_xy[:, 0], side='right') - 1, 0, dest_grid_x - 1)
+        dest_yi = np.clip(np.searchsorted(y_edges, dest_xy[:, 1], side='right') - 1, 0, dest_grid_y - 1)
+
+        # Thrower grid positions
+        x_positions = np.linspace(-25, 25, thrower_grid_x).tolist()
+        y_positions = np.linspace(0, 120, thrower_grid_y).tolist()
+
+        two_sigma_sq = 2 * radius * radius
+        grids: Dict[str, list] = {}
+
+        for xi, qx in enumerate(x_positions):
+            for yi, qy in enumerate(y_positions):
+                dist_sq = (thrower_xy[:, 0] - qx) ** 2 + (thrower_xy[:, 1] - qy) ** 2
+                weights = np.exp(-dist_sq / two_sigma_sq)
+
+                block_grid = np.zeros((dest_grid_y, dest_grid_x), dtype=np.float64)
+                np.add.at(block_grid, (dest_yi, dest_xi), weights)
+
+                # Normalize to probability distribution
+                total = block_grid.sum()
+                if total > 0:
+                    block_grid /= total
+
+                block_grid = gaussian_filter(block_grid, sigma=0.8)
+                grids[f"{xi},{yi}"] = block_grid.tolist()
+
+        return {
+            "grids": grids,
+            "x_positions": x_positions,
+            "y_positions": y_positions,
+            "extent": [-25, 25, 0, 120],
+            "total_throwaways": len(rows),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/heatmap/turnover-origins")
+def get_turnover_origins(
+    player: Optional[str] = Query(None, description="Player name to filter by (omit for all players)"),
+    grid_x: int = Query(50, ge=10, le=200, description="Grid bins across field width"),
+    grid_y: int = Query(60, ge=10, le=200, description="Grid bins across field length"),
+    smooth: float = Query(2.0, ge=0, le=10, description="Gaussian smoothing sigma"),
+) -> Dict[str, Any]:
+    """Return turnover rate heatmap by thrower position (turnovers / total throws)."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        player_filter = " AND e.thrower = %s" if player else ""
+        params = (player,) if player else ()
+
+        # All throws (completions 18, goals 19, drops 20, throwaways 22),
+        # direction-normalized so all throws attack toward y=110.
+        # Filter to playing field only (y between 0 and 100, excludes attacking end zone).
+        cur.execute(f"""
+            SELECT x, y FROM (
+                SELECT
+                    CASE WHEN e.team = g.away_team_id THEN -e.thrower_x ELSE e.thrower_x END as x,
+                    CASE WHEN e.team = g.away_team_id THEN 120 - e.thrower_y ELSE e.thrower_y END as y
+                FROM events e
+                JOIN games g ON e.game_id = g.game_id
+                WHERE e.event_type IN (18, 19, 20, 22)
+                  AND e.thrower_x IS NOT NULL
+                  AND e.thrower_y IS NOT NULL
+                  {player_filter}
+            ) sub
+            WHERE y >= 0 AND y <= 100
+        """, params)
+        all_throw_rows = cur.fetchall()
+
+        # Turnover throws only (drops 20, throwaways 22)
+        cur.execute(f"""
+            SELECT x, y FROM (
+                SELECT
+                    CASE WHEN e.team = g.away_team_id THEN -e.thrower_x ELSE e.thrower_x END as x,
+                    CASE WHEN e.team = g.away_team_id THEN 120 - e.thrower_y ELSE e.thrower_y END as y
+                FROM events e
+                JOIN games g ON e.game_id = g.game_id
+                WHERE e.event_type IN (20, 22)
+                  AND e.thrower_x IS NOT NULL
+                  AND e.thrower_y IS NOT NULL
+                  {player_filter}
+            ) sub
+            WHERE y >= 0 AND y <= 100
+        """, params)
+        turnover_rows = cur.fetchall()
+
+        cur.close()
+        conn.close()
+
+        if not all_throw_rows:
+            raise HTTPException(status_code=404, detail="No throw data found")
+
+        x_edges = np.linspace(-25, 25, grid_x + 1)
+        y_edges = np.linspace(0, 120, grid_y + 1)
+
+        throw_grid = np.zeros((grid_y, grid_x), dtype=np.float64)
+        for row in all_throw_rows:
+            xi = np.searchsorted(x_edges, float(row['x']), side='right') - 1
+            yi = np.searchsorted(y_edges, float(row['y']), side='right') - 1
+            if 0 <= xi < grid_x and 0 <= yi < grid_y:
+                throw_grid[yi, xi] += 1
+
+        turnover_grid = np.zeros((grid_y, grid_x), dtype=np.float64)
+        for row in turnover_rows:
+            xi = np.searchsorted(x_edges, float(row['x']), side='right') - 1
+            yi = np.searchsorted(y_edges, float(row['y']), side='right') - 1
+            if 0 <= xi < grid_x and 0 <= yi < grid_y:
+                turnover_grid[yi, xi] += 1
+
+        # Turnover rate from raw counts (before smoothing to avoid bleeding into empty cells)
+        rate_grid = np.zeros_like(throw_grid)
+        mask = throw_grid > 0
+        rate_grid[mask] = turnover_grid[mask] / throw_grid[mask]
+
+        # Smooth the rate grid (not the raw counts)
+        if smooth > 0:
+            rate_grid = gaussian_filter(rate_grid, sigma=smooth)
+
+        # Zero out cells beyond the playing field (y > 100) after smoothing
+        # to prevent bleed into the attacking end zone
+        y_100_idx = np.searchsorted(y_edges, 100, side='right') - 1
+        if y_100_idx < grid_y:
+            rate_grid[y_100_idx + 1:, :] = 0
+
+        return {
+            "grid": rate_grid.tolist(),
+            "total_throws": len(all_throw_rows),
+            "total_turnovers": len(turnover_rows),
+            "extent": [-25, 25, 0, 120],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

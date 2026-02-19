@@ -1,7 +1,8 @@
 Models
 1. Interactive throwing heatmap, could also be player recepetion predicition
     Lets have it click-drag the player around, then mouse to highlight percentages when off the player
-    Might make sense to have denser close to the end zone
+    Add a couple settings like granularity, grid size, and a button to recalc from exactly where they are
+
 1b. Same thing but for blocks. We can just do this generally, not player specific
 2. Team start-up plays / dead disc plays / strategy classification
 3. Line/player synergy
