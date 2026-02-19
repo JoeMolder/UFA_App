@@ -8,6 +8,7 @@ function Home() {
   const [stats, setStats] = useState<StatsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
 
   useEffect(() => {
     const fetchData = async () => {
@@ -17,7 +18,7 @@ function Home() {
 
         const [statsData, gamesData] = await Promise.all([
           api.getStats(),
-          api.getGames(10)
+          api.getGames(20)
         ])
 
         setStats(statsData)
@@ -32,6 +33,18 @@ function Home() {
 
     fetchData()
   }, [])
+
+  useEffect(() => {
+    const timeout = setTimeout(async () => {
+      try {
+        const results = await api.getGames(searchQuery ? 50 : 20, searchQuery)
+        setGames(results)
+      } catch (err) {
+        console.error('Search error:', err)
+      }
+    }, 300)
+    return () => clearTimeout(timeout)
+  }, [searchQuery])
 
   const handleGameClick = (gameId: string) => {
     navigate(`/game/${gameId}`)
@@ -116,7 +129,25 @@ function Home() {
       )}
 
       <div className="games-section">
-        <h2>Recent Games</h2>
+        <h2>Games</h2>
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search by team or date (e.g. empire, 2024-05)..."
+          style={{
+            width: '100%',
+            maxWidth: '400px',
+            padding: '8px 12px',
+            fontSize: '14px',
+            borderRadius: '6px',
+            border: '1px solid #555',
+            backgroundColor: '#2a2a3e',
+            color: 'white',
+            boxSizing: 'border-box',
+            marginBottom: '16px',
+          }}
+        />
         <div className="games-list">
           {games.map((game) => (
             <div

@@ -50,6 +50,13 @@ export interface PredictionResponse {
   extent: [number, number, number, number];
 }
 
+export interface BatchPredictionResponse {
+  grids: Record<string, number[][]>;
+  x_positions: number[];
+  y_positions: number[];
+  extent: [number, number, number, number];
+}
+
 export interface PlayerStats {
   total_throws: number;
   completion_pct: number;
@@ -84,8 +91,10 @@ export interface EmbeddingsResponse {
 // API Functions
 export const api = {
   // Get list of games
-  getGames: async (limit = 10): Promise<Game[]> => {
-    const response = await apiClient.get<Game[]>(`/games?limit=${limit}`);
+  getGames: async (limit = 10, search = ''): Promise<Game[]> => {
+    const params: Record<string, string | number> = { limit };
+    if (search) params.search = search;
+    const response = await apiClient.get<Game[]>('/games', { params });
     return response.data;
   },
 
@@ -128,6 +137,19 @@ export const api = {
   ): Promise<PredictionResponse> => {
     const response = await apiClient.get<PredictionResponse>('/predict/throws', {
       params: { player, x, y, grid_size: gridSize },
+    });
+    return response.data;
+  },
+
+  // Get batch throw predictions for all grid cells
+  predictThrowsBatch: async (
+    player: string,
+    gridCellsX = 10,
+    gridCellsY = 12,
+    heatmapResolution = 30
+  ): Promise<BatchPredictionResponse> => {
+    const response = await apiClient.get<BatchPredictionResponse>('/predict/throws/batch', {
+      params: { player, grid_cells_x: gridCellsX, grid_cells_y: gridCellsY, heatmap_resolution: heatmapResolution },
     });
     return response.data;
   },

@@ -1,11 +1,13 @@
 Models
 1. Interactive throwing heatmap, could also be player recepetion predicition
+    Lets have it click-drag the player around, then mouse to highlight percentages when off the player
+    Might make sense to have denser close to the end zone
+1b. Same thing but for blocks. We can just do this generally, not player specific
 2. Team start-up plays / dead disc plays / strategy classification
 3. Line/player synergy
 4. Scoring probability
-5. Completion probability (by team, by player, by field position)
-6. Player similarity
-7. Possession generation
+5. Player similarity
+6. Possession generation
 
 Other Ideas:
 Where d’s occur, this could be per player too

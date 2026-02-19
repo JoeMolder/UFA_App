@@ -63,6 +63,10 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
   const EVENT_TYPE_DROP = 20
   const EVENT_TYPE_GOAL = 19
   const EVENT_TYPE_BLOCK = 11
+  const EVENT_TYPE_FOUL_BY = 16
+  const EVENT_TYPE_FOUL_ON = 17
+  const EVENT_TYPE_CALLAHAN = 23
+  const EVENT_TYPE_STALL = 24
   const EVENT_TYPE_INJURY = 25
 
   // Group events into possessions
@@ -88,10 +92,12 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
 
       currentTeam = event.team
 
-      // End possession on goal, throwaway, or drop
+      // End possession on goal, throwaway, drop, callahan, or stall
       if (event.event_type === EVENT_TYPE_GOAL ||
           event.event_type === EVENT_TYPE_THROWAWAY ||
-          event.event_type === EVENT_TYPE_DROP) {
+          event.event_type === EVENT_TYPE_DROP ||
+          event.event_type === EVENT_TYPE_CALLAHAN ||
+          event.event_type === EVENT_TYPE_STALL) {
         possessions.push({
           team: currentTeam,
           startIndex: possessionStart,
@@ -339,6 +345,188 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
       )
     }
 
+    // Handle stalls (type 24) - turnover at thrower's position
+    if (event.event_type === EVENT_TYPE_STALL && throwerX != null && throwerY != null) {
+      const normThrowerX = normalizeX(throwerX, team)
+      const normThrowerY = normalizeY(throwerY, team)
+      const x1 = scaleX(normThrowerY)
+      const y1 = scaleY(normThrowerX)
+
+      return (
+        <g
+          key={`throw-${index}`}
+          opacity={opacity}
+          onClick={handleClick}
+          style={{ cursor: 'pointer' }}
+        >
+          {/* Stall marker - orange diamond */}
+          <rect
+            x={x1 - 6}
+            y={y1 - 6}
+            width="12"
+            height="12"
+            fill="#f59e0b"
+            stroke="#fff"
+            strokeWidth="1"
+            transform={`rotate(45, ${x1}, ${y1})`}
+            onMouseEnter={(e) => setTooltip({ text: `${event.thrower} (stall)`, x: e.clientX, y: e.clientY })}
+            onMouseMove={(e) => setTooltip({ text: `${event.thrower} (stall)`, x: e.clientX, y: e.clientY })}
+            onMouseLeave={() => setTooltip(null)}
+          />
+        </g>
+      )
+    }
+
+    // Handle callahans (type 23) - purple line from thrower to previous receiver position (where disc was caught by defender)
+    if (event.event_type === EVENT_TYPE_CALLAHAN && throwerX != null && throwerY != null) {
+      const normThrowerX = normalizeX(throwerX, team)
+      const normThrowerY = normalizeY(throwerY, team)
+      const x1 = scaleX(normThrowerY)
+      const y1 = scaleY(normThrowerX)
+
+      // Look backward for previous completed throw to get where the disc was caught
+      let prevReceiverX: number | null = null
+      let prevReceiverY: number | null = null
+      for (let i = index - 1; i >= 0; i--) {
+        const prev = events[i]
+        if (prev.event_type === EVENT_TYPE_COMPLETION || prev.event_type === EVENT_TYPE_GOAL) {
+          prevReceiverX = prev.receiver_x ?? null
+          prevReceiverY = prev.receiver_y ?? null
+          break
+        }
+      }
+
+      // If we found a previous position, draw a line from there to the callahan throw point
+      if (prevReceiverX != null && prevReceiverY != null) {
+        const normPrevX = normalizeX(prevReceiverX, team)
+        const normPrevY = normalizeY(prevReceiverY, team)
+        const px = scaleX(normPrevY)
+        const py = scaleY(normPrevX)
+
+        return (
+          <g
+            key={`throw-${index}`}
+            opacity={opacity}
+            onClick={handleClick}
+            style={{ cursor: 'pointer' }}
+          >
+            <line
+              x1={px} y1={py} x2={x1} y2={y1}
+              stroke="#a855f7"
+              strokeWidth="2"
+              strokeDasharray="5,5"
+              markerEnd="url(#arrowhead-purple)"
+            />
+            <circle cx={px} cy={py} r="4" fill="#a855f7"
+              onMouseEnter={(e) => setTooltip({ text: `${event.thrower} (callahan thrown)`, x: e.clientX, y: e.clientY })}
+              onMouseMove={(e) => setTooltip({ text: `${event.thrower} (callahan thrown)`, x: e.clientX, y: e.clientY })}
+              onMouseLeave={() => setTooltip(null)}
+            />
+            {/* Callahan catch marker */}
+            <circle cx={x1} cy={y1} r="6" fill="#a855f7" stroke="#fff" strokeWidth="2"
+              onMouseEnter={(e) => setTooltip({ text: `Callahan caught (${event.defender || 'unknown'})`, x: e.clientX, y: e.clientY })}
+              onMouseMove={(e) => setTooltip({ text: `Callahan caught (${event.defender || 'unknown'})`, x: e.clientX, y: e.clientY })}
+              onMouseLeave={() => setTooltip(null)}
+            />
+          </g>
+        )
+      }
+
+      // Fallback: just show marker at thrower position
+      return (
+        <g key={`throw-${index}`} opacity={opacity} onClick={handleClick} style={{ cursor: 'pointer' }}>
+          <circle cx={x1} cy={y1} r="8" fill="#a855f7" stroke="#fff" strokeWidth="2"
+            onMouseEnter={(e) => setTooltip({ text: `${event.thrower} (callahan thrown)`, x: e.clientX, y: e.clientY })}
+            onMouseMove={(e) => setTooltip({ text: `${event.thrower} (callahan thrown)`, x: e.clientX, y: e.clientY })}
+            onMouseLeave={() => setTooltip(null)}
+          />
+        </g>
+      )
+    }
+
+    // Handle fouls (types 16/17) - blue dotted line showing disc movement (yardage gained)
+    if (event.event_type === EVENT_TYPE_FOUL_BY || event.event_type === EVENT_TYPE_FOUL_ON) {
+      // Look backward for previous throw's end position (where disc was)
+      let fromX: number | null = null
+      let fromY: number | null = null
+      let fromTeam = team
+      for (let i = index - 1; i >= 0; i--) {
+        const prev = events[i]
+        if (prev.event_type === EVENT_TYPE_COMPLETION || prev.event_type === EVENT_TYPE_GOAL) {
+          fromX = prev.receiver_x ?? null
+          fromY = prev.receiver_y ?? null
+          fromTeam = prev.team || team
+          break
+        }
+        if (prev.event_type === EVENT_TYPE_DROP && prev.receiver_x != null) {
+          fromX = prev.receiver_x
+          fromY = prev.receiver_y ?? null
+          fromTeam = prev.team || team
+          break
+        }
+        if (prev.event_type === EVENT_TYPE_THROWAWAY && prev.turnover_x != null) {
+          fromX = prev.turnover_x
+          fromY = prev.turnover_y ?? null
+          fromTeam = prev.team || team
+          break
+        }
+      }
+
+      // Look forward for next throw's start position (where disc ended up after foul)
+      let toX: number | null = null
+      let toY: number | null = null
+      let toTeam = team
+      for (let i = index + 1; i < events.length; i++) {
+        const next = events[i]
+        if (next.thrower_x != null && next.thrower_y != null &&
+            (next.event_type === EVENT_TYPE_COMPLETION || next.event_type === EVENT_TYPE_GOAL ||
+             next.event_type === EVENT_TYPE_DROP || next.event_type === EVENT_TYPE_THROWAWAY)) {
+          toX = next.thrower_x
+          toY = next.thrower_y
+          toTeam = next.team || team
+          break
+        }
+      }
+
+      if (fromX != null && fromY != null && toX != null && toY != null) {
+        const nx1 = normalizeX(fromX, fromTeam)
+        const ny1 = normalizeY(fromY, fromTeam)
+        const nx2 = normalizeX(toX, toTeam)
+        const ny2 = normalizeY(toY, toTeam)
+        const sx1 = scaleX(ny1)
+        const sy1 = scaleY(nx1)
+        const sx2 = scaleX(ny2)
+        const sy2 = scaleY(nx2)
+
+        return (
+          <g
+            key={`throw-${index}`}
+            opacity={opacity}
+            onClick={handleClick}
+            style={{ cursor: 'pointer' }}
+          >
+            <line
+              x1={sx1} y1={sy1} x2={sx2} y2={sy2}
+              stroke="#3b82f6"
+              strokeWidth="2"
+              strokeDasharray="4,4"
+              markerEnd="url(#arrowhead-blue)"
+            />
+            <circle cx={sx1} cy={sy1} r="3" fill="#3b82f6"
+              onMouseEnter={(e) => setTooltip({ text: 'Foul (disc moved)', x: e.clientX, y: e.clientY })}
+              onMouseMove={(e) => setTooltip({ text: 'Foul (disc moved)', x: e.clientX, y: e.clientY })}
+              onMouseLeave={() => setTooltip(null)}
+            />
+            <circle cx={sx2} cy={sy2} r="3" fill="#3b82f6"
+              onMouseEnter={(e) => setTooltip({ text: 'Foul (disc moved)', x: e.clientX, y: e.clientY })}
+              onMouseMove={(e) => setTooltip({ text: 'Foul (disc moved)', x: e.clientX, y: e.clientY })}
+              onMouseLeave={() => setTooltip(null)}
+            />
+          </g>
+        )
+      }
+    }
+
     return null
   }
 
@@ -376,6 +564,26 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
             orient="auto"
           >
             <polygon points="0 0, 10 3, 0 6" fill="#ef4444" />
+          </marker>
+          <marker
+            id="arrowhead-purple"
+            markerWidth="10"
+            markerHeight="10"
+            refX="9"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 10 3, 0 6" fill="#a855f7" />
+          </marker>
+          <marker
+            id="arrowhead-blue"
+            markerWidth="10"
+            markerHeight="10"
+            refX="9"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 10 3, 0 6" fill="#3b82f6" />
           </marker>
         </defs>
 
@@ -457,6 +665,18 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
         <div className="legend-item">
           <span className="legend-square"></span>
           <span>Throwaway (square)</span>
+        </div>
+        <div className="legend-item">
+          <span className="legend-dot" style={{ backgroundColor: '#f59e0b', transform: 'rotate(45deg)', borderRadius: '0' }}></span>
+          <span>Stall (diamond)</span>
+        </div>
+        <div className="legend-item">
+          <span className="legend-dot" style={{ backgroundColor: '#a855f7' }}></span>
+          <span>Callahan</span>
+        </div>
+        <div className="legend-item">
+          <span className="legend-dot" style={{ backgroundColor: '#3b82f6' }}></span>
+          <span>Foul (disc moved)</span>
         </div>
       </div>
 

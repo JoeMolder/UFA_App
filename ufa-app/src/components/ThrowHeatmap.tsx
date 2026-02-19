@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { api, PredictionResponse } from '../api/client'
+import { api, BatchPredictionResponse } from '../api/client'
 
 interface ThrowHeatmapProps {
   players: string[]
@@ -7,11 +7,10 @@ interface ThrowHeatmapProps {
 
 // Hot colormap: black → red → yellow → white
 function hotColor(t: number): [number, number, number, number] {
-  // t is 0..1 (normalized probability)
   const r = Math.min(255, Math.floor(t * 3 * 255))
   const g = Math.min(255, Math.max(0, Math.floor((t * 3 - 1) * 255)))
   const b = Math.min(255, Math.max(0, Math.floor((t * 3 - 2) * 255)))
-  const a = Math.floor(t * 200 + 20) // semi-transparent at low values
+  const a = Math.floor(t * 200 + 20)
   return [r, g, b, a]
 }
 
@@ -19,12 +18,19 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [selectedPlayer, setSelectedPlayer] = useState(players[0] || '')
   const [throwerPos, setThrowerPos] = useState({ x: 0, y: 60 })
-  const [prediction, setPrediction] = useState<PredictionResponse | null>(null)
+  const [batchData, setBatchData] = useState<BatchPredictionResponse | null>(null)
+  const [currentGrid, setCurrentGrid] = useState<number[][] | null>(null)
   const [loading, setLoading] = useState(false)
-  const [dragging, setDragging] = useState(false)
+  const [loadingProgress, setLoadingProgress] = useState(0)
   const [searchQuery, setSearchQuery] = useState('')
   const [showDropdown, setShowDropdown] = useState(false)
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null)
+  const [hoverProbability, setHoverProbability] = useState<number | null>(null)
+  const [boxStart, setBoxStart] = useState<{ x: number; y: number } | null>(null)
+  const [boxEnd, setBoxEnd] = useState<{ x: number; y: number } | null>(null)
+  const [drawingBox, setDrawingBox] = useState(false)
+  const [selectionBox, setSelectionBox] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null)
 
   // Canvas layout constants
   const CANVAS_WIDTH = 900
@@ -34,8 +40,8 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
   const FIELD_X_MAX = 25
   const FIELD_Y_MIN = 0
   const FIELD_Y_MAX = 120
+  const MARKER_RADIUS = 12
 
-  // Field drawing area
   const fieldLeft = PADDING
   const fieldRight = CANVAS_WIDTH - PADDING
   const fieldTop = PADDING
@@ -43,8 +49,6 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
   const fieldWidth = fieldRight - fieldLeft
   const fieldHeight = fieldBottom - fieldTop
 
-  // Convert field coords to canvas pixel coords
-  // Field is rotated: Y (length 0-120) maps to canvas X, X (width -25..25) maps to canvas Y
   const fieldToCanvasX = useCallback(
     (fieldY: number) => fieldLeft + ((fieldY - FIELD_Y_MIN) / (FIELD_Y_MAX - FIELD_Y_MIN)) * fieldWidth,
     [fieldLeft, fieldWidth]
@@ -54,7 +58,6 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     [fieldTop, fieldHeight]
   )
 
-  // Convert canvas pixel coords back to field coords
   const canvasToFieldY = useCallback(
     (canvasX: number) => FIELD_Y_MIN + ((canvasX - fieldLeft) / fieldWidth) * (FIELD_Y_MAX - FIELD_Y_MIN),
     [fieldLeft, fieldWidth]
@@ -64,40 +67,161 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     [fieldTop, fieldHeight]
   )
 
-  const GRID_SIZE = 200
+  // Find nearest grid cell and return its cached heatmap
+  const getGridForPosition = useCallback(
+    (fieldX: number, fieldY: number) => {
+      if (!batchData) return null
 
-  // Fetch prediction
-  const fetchPrediction = useCallback(
-    async (player: string, x: number, y: number) => {
-      if (!player) return
-      setLoading(true)
-      try {
-        const result = await api.predictThrows(player, x, y, GRID_SIZE)
-        setPrediction(result)
-      } catch (err) {
-        console.error('Prediction failed:', err)
-      } finally {
-        setLoading(false)
+      const { x_positions, y_positions, grids } = batchData
+
+      let bestXi = 0
+      let bestXDist = Math.abs(fieldX - x_positions[0])
+      for (let i = 1; i < x_positions.length; i++) {
+        const dist = Math.abs(fieldX - x_positions[i])
+        if (dist < bestXDist) {
+          bestXDist = dist
+          bestXi = i
+        }
       }
+
+      let bestYi = 0
+      let bestYDist = Math.abs(fieldY - y_positions[0])
+      for (let i = 1; i < y_positions.length; i++) {
+        const dist = Math.abs(fieldY - y_positions[i])
+        if (dist < bestYDist) {
+          bestYDist = dist
+          bestYi = i
+        }
+      }
+
+      const key = `${bestXi},${bestYi}`
+      return grids[key] || null
     },
-    []
+    [batchData]
   )
 
-  // Debounced fetch during drag
-  const debouncedFetch = useCallback(
-    (player: string, x: number, y: number) => {
-      if (debounceRef.current) clearTimeout(debounceRef.current)
-      debounceRef.current = setTimeout(() => fetchPrediction(player, x, y), 50)
+  // Get probability at a specific field position from the current heatmap grid
+  const getProbabilityAtPosition = useCallback(
+    (fieldX: number, fieldY: number) => {
+      if (!currentGrid) return null
+      const rows = currentGrid.length
+      const cols = currentGrid[0].length
+
+      // Map field position to grid indices
+      const r = Math.floor(((fieldY - FIELD_Y_MIN) / (FIELD_Y_MAX - FIELD_Y_MIN)) * rows)
+      const c = Math.floor(((fieldX - FIELD_X_MIN) / (FIELD_X_MAX - FIELD_X_MIN)) * cols)
+
+      if (r < 0 || r >= rows || c < 0 || c >= cols) return null
+      return currentGrid[r][c]
     },
-    [fetchPrediction]
+    [currentGrid]
   )
 
-  // Initial fetch
+  // Compute probability within a field-coordinate box
+  // Grid values are probability densities from a normalizing flow,
+  // so we compute fraction of total density as the probability estimate
+  const getBoxProbability = useCallback(
+    (x1: number, y1: number, x2: number, y2: number) => {
+      if (!currentGrid) return 0
+      const rows = currentGrid.length
+      const cols = currentGrid[0].length
+
+      const minX = Math.min(x1, x2)
+      const maxX = Math.max(x1, x2)
+      const minY = Math.min(y1, y2)
+      const maxY = Math.max(y1, y2)
+
+      // Map field coords to grid indices
+      const rMin = Math.max(0, Math.floor(((minY - FIELD_Y_MIN) / (FIELD_Y_MAX - FIELD_Y_MIN)) * rows))
+      const rMax = Math.min(rows - 1, Math.floor(((maxY - FIELD_Y_MIN) / (FIELD_Y_MAX - FIELD_Y_MIN)) * rows))
+      const cMin = Math.max(0, Math.floor(((minX - FIELD_X_MIN) / (FIELD_X_MAX - FIELD_X_MIN)) * cols))
+      const cMax = Math.min(cols - 1, Math.floor(((maxX - FIELD_X_MIN) / (FIELD_X_MAX - FIELD_X_MIN)) * cols))
+
+      // Sum density in box and total density across entire grid
+      let boxSum = 0
+      let totalSum = 0
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const val = currentGrid[r][c]
+          totalSum += val
+          if (r >= rMin && r <= rMax && c >= cMin && c <= cMax) {
+            boxSum += val
+          }
+        }
+      }
+
+      if (totalSum === 0) return 0
+      return boxSum / totalSum
+    },
+    [currentGrid]
+  )
+
+  // Fetch predictions row-by-row for real progress tracking
   useEffect(() => {
-    if (selectedPlayer) {
-      fetchPrediction(selectedPlayer, throwerPos.x, throwerPos.y)
+    if (!selectedPlayer) return
+    let cancelled = false
+
+    const GRID_X = 10
+    const GRID_Y = 24
+    const RESOLUTION = 200
+
+    const fetchRowByRow = async () => {
+      setLoading(true)
+      setLoadingProgress(0)
+
+      const xPositions = Array.from({ length: GRID_X }, (_, i) => -25 + (50 * i) / (GRID_X - 1))
+      const yPositions = Array.from({ length: GRID_Y }, (_, i) => (120 * i) / (GRID_Y - 1))
+      const grids: Record<string, number[][]> = {}
+      const totalCalls = GRID_X * GRID_Y
+      let completed = 0
+
+      try {
+        // Process one x-row at a time, all y positions in parallel per row
+        for (let xi = 0; xi < GRID_X; xi++) {
+          if (cancelled) return
+
+          const rowPromises = yPositions.map(async (fieldY, yi) => {
+            const result = await api.predictThrows(selectedPlayer, xPositions[xi], fieldY, RESOLUTION)
+            grids[`${xi},${yi}`] = result.grid
+            completed++
+            if (!cancelled) {
+              setLoadingProgress(Math.round((completed / totalCalls) * 100))
+            }
+          })
+
+          await Promise.all(rowPromises)
+        }
+
+        if (cancelled) return
+
+        const batchResult = {
+          grids,
+          x_positions: xPositions,
+          y_positions: yPositions,
+          extent: [-25, 25, 0, 120] as [number, number, number, number],
+        }
+
+        setBatchData(batchResult)
+        const initialGrid = grids['4,11'] // roughly center
+        setCurrentGrid(initialGrid || null)
+      } catch (err) {
+        console.error('Prediction loading failed:', err)
+      } finally {
+        if (!cancelled) {
+          setTimeout(() => setLoading(false), 200)
+        }
+      }
     }
-  }, [selectedPlayer]) // eslint-disable-line react-hooks/exhaustive-deps
+
+    fetchRowByRow()
+    return () => { cancelled = true }
+  }, [selectedPlayer])
+
+  // Update current grid when position changes
+  useEffect(() => {
+    const grid = getGridForPosition(throwerPos.x, throwerPos.y)
+    if (grid) setCurrentGrid(grid)
+  }, [throwerPos, getGridForPosition])
 
   // Draw canvas
   useEffect(() => {
@@ -106,7 +230,6 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    // Clear
     ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
 
     // Background
@@ -117,13 +240,12 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     ctx.fillStyle = '#2a5934'
     ctx.fillRect(fieldLeft, fieldTop, fieldWidth, fieldHeight)
 
-    // Draw heatmap if we have prediction data
-    if (prediction) {
-      const grid = prediction.grid
+    // Draw heatmap from cached grid
+    if (currentGrid) {
+      const grid = currentGrid
       const rows = grid.length
       const cols = grid[0].length
 
-      // Find max for normalization
       let maxVal = 0
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
@@ -132,10 +254,6 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
       }
 
       if (maxVal > 0) {
-        const cellW = fieldWidth / cols
-        const cellH = fieldHeight / rows
-
-        // Create ImageData for efficient pixel rendering
         const imageData = ctx.getImageData(fieldLeft, fieldTop, fieldWidth, fieldHeight)
         const data = imageData.data
 
@@ -143,20 +261,6 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
           for (let c = 0; c < cols; c++) {
             const t = grid[r][c] / maxVal
 
-            // Grid maps: col→field X (width), row→field Y (length)
-            // But our canvas has field Y→canvas X, field X→canvas Y
-            // Grid: row is y_bins (field Y normalized), col is x_bins (field X normalized)
-            // So row→canvas X direction, col→canvas Y direction
-            const pixelXStart = Math.floor(r * cellH)
-            const pixelYStart = Math.floor(c * cellW)
-            const pixelXEnd = Math.floor((r + 1) * cellH)
-            const pixelYEnd = Math.floor((c + 1) * cellW)
-
-            // Wait - the grid is [y_bins, x_bins] where:
-            // x_bins = field X normalized (0..1 → -25..25)
-            // y_bins = field Y normalized (0..1 → 0..120)
-            // On canvas: field Y → horizontal (canvas X), field X → vertical (canvas Y)
-            // So: row (y_bins index) → canvas X, col (x_bins index) → canvas Y
             const canvasXStart = Math.floor((r / rows) * fieldWidth)
             const canvasXEnd = Math.floor(((r + 1) / rows) * fieldWidth)
             const canvasYStart = Math.floor((c / cols) * fieldHeight)
@@ -167,7 +271,6 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
               for (let py = canvasYStart; py < canvasYEnd && py < fieldHeight; py++) {
                 for (let px = canvasXStart; px < canvasXEnd && px < fieldWidth; px++) {
                   const idx = (py * fieldWidth + px) * 4
-                  // Blend with field green
                   const alpha = ca / 255
                   data[idx] = Math.floor(data[idx] * (1 - alpha) + cr * alpha)
                   data[idx + 1] = Math.floor(data[idx + 1] * (1 - alpha) + cg * alpha)
@@ -187,7 +290,6 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)'
     ctx.lineWidth = 1
 
-    // Endzones (Y=0-20 and Y=100-120)
     const ez1Right = fieldToCanvasX(20)
     const ez2Left = fieldToCanvasX(100)
 
@@ -195,7 +297,6 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     ctx.fillRect(fieldLeft, fieldTop, ez1Right - fieldLeft, fieldHeight)
     ctx.fillRect(ez2Left, fieldTop, fieldRight - ez2Left, fieldHeight)
 
-    // Goal lines
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)'
     ctx.lineWidth = 2
     ctx.beginPath()
@@ -207,7 +308,6 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     ctx.lineTo(ez2Left, fieldBottom)
     ctx.stroke()
 
-    // Midfield line
     const midX = fieldToCanvasX(60)
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)'
     ctx.lineWidth = 1
@@ -218,7 +318,6 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     ctx.stroke()
     ctx.setLineDash([])
 
-    // Field border
     ctx.strokeStyle = 'white'
     ctx.lineWidth = 2
     ctx.strokeRect(fieldLeft, fieldTop, fieldWidth, fieldHeight)
@@ -228,7 +327,7 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     const markerCY = fieldToCanvasY(throwerPos.x)
 
     ctx.beginPath()
-    ctx.arc(markerCX, markerCY, 12, 0, Math.PI * 2)
+    ctx.arc(markerCX, markerCY, MARKER_RADIUS, 0, Math.PI * 2)
     ctx.fillStyle = 'cyan'
     ctx.fill()
     ctx.strokeStyle = 'white'
@@ -239,21 +338,17 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     ctx.fillStyle = 'white'
     ctx.font = '12px monospace'
     ctx.textAlign = 'center'
-
-    // Y-axis labels (field Y along canvas X)
     for (const fy of [0, 20, 40, 60, 80, 100, 120]) {
       const cx = fieldToCanvasX(fy)
       ctx.fillText(String(fy), cx, fieldBottom + 18)
     }
-
-    // X-axis labels (field X along canvas Y)
     ctx.textAlign = 'right'
     for (const fx of [-20, -10, 0, 10, 20]) {
       const cy = fieldToCanvasY(fx)
       ctx.fillText(String(fx), fieldLeft - 8, cy + 4)
     }
 
-    // Position label
+    // Position label next to thrower dot
     ctx.textAlign = 'left'
     ctx.font = '14px monospace'
     ctx.fillStyle = 'cyan'
@@ -263,17 +358,141 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
       markerCY - 4
     )
 
-    // Loading indicator
-    if (loading) {
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)'
-      ctx.font = '16px monospace'
-      ctx.textAlign = 'right'
-      ctx.fillText('Loading...', CANVAS_WIDTH - 10, 20)
-    }
-  }, [prediction, throwerPos, loading, fieldToCanvasX, fieldToCanvasY])
+    // Hover probability tooltip
+    if (hoverPos && hoverProbability !== null && !dragging) {
+      const hoverCX = fieldToCanvasX(hoverPos.y)
+      const hoverCY = fieldToCanvasY(hoverPos.x)
 
-  // Mouse handlers for dragging
-  const getFieldPos = useCallback(
+      // Small crosshair at hover position
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(hoverCX - 6, hoverCY)
+      ctx.lineTo(hoverCX + 6, hoverCY)
+      ctx.moveTo(hoverCX, hoverCY - 6)
+      ctx.lineTo(hoverCX, hoverCY + 6)
+      ctx.stroke()
+
+      // Probability label
+      const label = `P: ${hoverProbability.toFixed(4)}`
+      ctx.font = '13px monospace'
+      const metrics = ctx.measureText(label)
+      const padX = 6
+      const padY = 4
+      const boxW = metrics.width + padX * 2
+      const boxH = 18 + padY * 2
+
+      // Position tooltip above cursor, flip if near top
+      let tooltipX = hoverCX - boxW / 2
+      let tooltipY = hoverCY - boxH - 10
+      if (tooltipY < fieldTop) tooltipY = hoverCY + 14
+      if (tooltipX < fieldLeft) tooltipX = fieldLeft
+      if (tooltipX + boxW > fieldRight) tooltipX = fieldRight - boxW
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.8)'
+      ctx.fillRect(tooltipX, tooltipY, boxW, boxH)
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)'
+      ctx.lineWidth = 1
+      ctx.strokeRect(tooltipX, tooltipY, boxW, boxH)
+
+      ctx.fillStyle = 'white'
+      ctx.textAlign = 'left'
+      ctx.fillText(label, tooltipX + padX, tooltipY + padY + 14)
+    }
+
+    // Selection box (active drawing or completed)
+    const activeBox = drawingBox && boxStart && boxEnd ? boxStart : null
+    const activeBoxEnd = drawingBox && boxStart && boxEnd ? boxEnd : null
+    const displayBox = activeBox && activeBoxEnd
+      ? { x1: activeBox.x, y1: activeBox.y, x2: activeBoxEnd.x, y2: activeBoxEnd.y }
+      : selectionBox
+
+    if (displayBox) {
+      const bx1 = fieldToCanvasX(Math.min(displayBox.y1, displayBox.y2))
+      const bx2 = fieldToCanvasX(Math.max(displayBox.y1, displayBox.y2))
+      const by1 = fieldToCanvasY(Math.min(displayBox.x1, displayBox.x2))
+      const by2 = fieldToCanvasY(Math.max(displayBox.x1, displayBox.x2))
+
+      // Fill
+      ctx.fillStyle = 'rgba(255, 255, 0, 0.15)'
+      ctx.fillRect(bx1, by1, bx2 - bx1, by2 - by1)
+
+      // Border
+      ctx.strokeStyle = 'rgba(255, 255, 0, 0.8)'
+      ctx.lineWidth = 2
+      ctx.setLineDash([6, 3])
+      ctx.strokeRect(bx1, by1, bx2 - bx1, by2 - by1)
+      ctx.setLineDash([])
+
+      // Probability label
+      const prob = getBoxProbability(displayBox.x1, displayBox.y1, displayBox.x2, displayBox.y2)
+      const pctLabel = `${(prob * 100).toFixed(1)}%`
+      ctx.font = 'bold 16px monospace'
+      const labelMetrics = ctx.measureText(pctLabel)
+      const labelX = (bx1 + bx2) / 2
+      const labelY = (by1 + by2) / 2
+
+      // Background pill for readability
+      const pillW = labelMetrics.width + 16
+      const pillH = 24
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.75)'
+      ctx.beginPath()
+      ctx.roundRect(labelX - pillW / 2, labelY - pillH / 2, pillW, pillH, 6)
+      ctx.fill()
+
+      ctx.fillStyle = '#ffd700'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(pctLabel, labelX, labelY)
+      ctx.textBaseline = 'alphabetic'
+    }
+
+    // Loading bar
+    if (loading) {
+      const barWidth = 260
+      const barHeight = 18
+      const barX = (CANVAS_WIDTH - barWidth) / 2
+      const barY = 14
+
+      // Dim overlay
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.3)'
+      ctx.fillRect(fieldLeft, fieldTop, fieldWidth, fieldHeight)
+
+      // Bar background
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'
+      ctx.beginPath()
+      ctx.roundRect(barX, barY, barWidth, barHeight, 4)
+      ctx.fill()
+
+      // Bar fill
+      const fillWidth = (loadingProgress / 100) * (barWidth - 4)
+      if (fillWidth > 0) {
+        const gradient = ctx.createLinearGradient(barX + 2, 0, barX + 2 + fillWidth, 0)
+        gradient.addColorStop(0, '#0ea5e9')
+        gradient.addColorStop(1, '#06b6d4')
+        ctx.fillStyle = gradient
+        ctx.beginPath()
+        ctx.roundRect(barX + 2, barY + 2, fillWidth, barHeight - 4, 3)
+        ctx.fill()
+      }
+
+      // Bar border
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.roundRect(barX, barY, barWidth, barHeight, 4)
+      ctx.stroke()
+
+      // Label
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
+      ctx.font = '12px monospace'
+      ctx.textAlign = 'center'
+      ctx.fillText(`Loading predictions... ${Math.round(loadingProgress)}%`, CANVAS_WIDTH / 2, barY + barHeight + 16)
+    }
+  }, [currentGrid, throwerPos, loading, loadingProgress, hoverPos, hoverProbability, dragging, drawingBox, boxStart, boxEnd, selectionBox, getBoxProbability, fieldToCanvasX, fieldToCanvasY])
+
+  // Get canvas coordinates from mouse event
+  const getCanvasCoords = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current
       if (!canvas) return null
@@ -282,46 +501,143 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
       const scaleY = CANVAS_HEIGHT / rect.height
       const canvasX = (e.clientX - rect.left) * scaleX
       const canvasY = (e.clientY - rect.top) * scaleY
-      const fieldX = canvasToFieldX(canvasY)
-      const fieldY = canvasToFieldY(canvasX)
-      // Clamp to field bounds
+      return { canvasX, canvasY }
+    },
+    []
+  )
+
+  const getFieldPos = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const coords = getCanvasCoords(e)
+      if (!coords) return null
+      const fieldX = canvasToFieldX(coords.canvasY)
+      const fieldY = canvasToFieldY(coords.canvasX)
       return {
         x: Math.max(FIELD_X_MIN, Math.min(FIELD_X_MAX, fieldX)),
         y: Math.max(FIELD_Y_MIN, Math.min(FIELD_Y_MAX, fieldY)),
       }
     },
-    [canvasToFieldX, canvasToFieldY]
+    [canvasToFieldX, canvasToFieldY, getCanvasCoords]
+  )
+
+  // Check if mouse is over the thrower dot
+  const isOverDot = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const coords = getCanvasCoords(e)
+      if (!coords) return false
+      const markerCX = fieldToCanvasX(throwerPos.y)
+      const markerCY = fieldToCanvasY(throwerPos.x)
+      const dx = coords.canvasX - markerCX
+      const dy = coords.canvasY - markerCY
+      return dx * dx + dy * dy <= (MARKER_RADIUS + 4) * (MARKER_RADIUS + 4)
+    },
+    [getCanvasCoords, fieldToCanvasX, fieldToCanvasY, throwerPos]
   )
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const pos = getFieldPos(e)
-      if (!pos) return
-      setDragging(true)
-      setThrowerPos(pos)
-      debouncedFetch(selectedPlayer, pos.x, pos.y)
+      if (isOverDot(e)) {
+        setDragging(true)
+        setHoverPos(null)
+        setHoverProbability(null)
+      } else {
+        // Start drawing a selection box
+        const pos = getFieldPos(e)
+        if (pos) {
+          setDrawingBox(true)
+          setBoxStart(pos)
+          setBoxEnd(pos)
+          setSelectionBox(null)
+
+          setHoverPos(null)
+          setHoverProbability(null)
+        }
+      }
     },
-    [getFieldPos, selectedPlayer, debouncedFetch]
+    [isOverDot, getFieldPos]
   )
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (!dragging) return
       const pos = getFieldPos(e)
       if (!pos) return
-      setThrowerPos(pos)
-      debouncedFetch(selectedPlayer, pos.x, pos.y)
+
+      if (dragging) {
+        setThrowerPos(pos)
+        setHoverPos(null)
+        setHoverProbability(null)
+      } else if (drawingBox) {
+        setBoxEnd(pos)
+        setHoverPos(null)
+        setHoverProbability(null)
+      } else {
+        // Show probability tooltip when not dragging or drawing
+        const prob = getProbabilityAtPosition(pos.x, pos.y)
+        setHoverPos(pos)
+        setHoverProbability(prob)
+      }
     },
-    [dragging, getFieldPos, selectedPlayer, debouncedFetch]
+    [dragging, drawingBox, getFieldPos, getProbabilityAtPosition]
   )
 
   const handleMouseUp = useCallback(() => {
     if (dragging) {
       setDragging(false)
-      if (debounceRef.current) clearTimeout(debounceRef.current)
-      fetchPrediction(selectedPlayer, throwerPos.x, throwerPos.y)
     }
-  }, [dragging, selectedPlayer, throwerPos, fetchPrediction])
+    if (drawingBox && boxStart && boxEnd) {
+      // Only keep the box if it's big enough (not just a click)
+      const dx = Math.abs(boxEnd.x - boxStart.x)
+      const dy = Math.abs(boxEnd.y - boxStart.y)
+      if (dx > 1 || dy > 2) {
+        const box = { x1: boxStart.x, y1: boxStart.y, x2: boxEnd.x, y2: boxEnd.y }
+        setSelectionBox(box)
+
+      } else {
+        // Too small, treat as a click — clear any existing box
+        setSelectionBox(null)
+      }
+      setDrawingBox(false)
+      setBoxStart(null)
+      setBoxEnd(null)
+    }
+  }, [dragging, drawingBox, boxStart, boxEnd, getBoxProbability])
+
+  const handleMouseLeave = useCallback(() => {
+    setDragging(false)
+    if (drawingBox) {
+      setDrawingBox(false)
+      setBoxStart(null)
+      setBoxEnd(null)
+    }
+    setHoverPos(null)
+    setHoverProbability(null)
+  }, [drawingBox])
+
+  // Update cursor on mouse move via ref
+  const handleCursorUpdate = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current
+      if (!canvas) return
+      if (dragging) {
+        canvas.style.cursor = 'grabbing'
+      } else if (drawingBox) {
+        canvas.style.cursor = 'crosshair'
+      } else if (isOverDot(e)) {
+        canvas.style.cursor = 'grab'
+      } else {
+        canvas.style.cursor = 'crosshair'
+      }
+    },
+    [dragging, drawingBox, isOverDot]
+  )
+
+  const handleMouseMoveWrapper = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      handleCursorUpdate(e)
+      handleMouseMove(e)
+    },
+    [handleCursorUpdate, handleMouseMove]
+  )
 
   // Player selection
   const handlePlayerSelect = (player: string) => {
@@ -407,20 +723,20 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
         width={CANVAS_WIDTH}
         height={CANVAS_HEIGHT}
         style={{
-          cursor: dragging ? 'grabbing' : 'crosshair',
+          cursor: 'crosshair',
           borderRadius: '8px',
           maxWidth: '100%',
           height: 'auto',
         }}
         onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
+        onMouseMove={handleMouseMoveWrapper}
         onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
       />
 
       {/* Instructions */}
       <div style={{ color: '#888', fontSize: '13px' }}>
-        Click or drag on the field to move the thrower position
+        Drag the cyan dot to move the thrower. Hover to see probability. Click and drag to draw a box and see total probability.
       </div>
     </div>
   )

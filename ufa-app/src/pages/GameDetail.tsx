@@ -61,8 +61,8 @@ function GameDetail() {
     let pointStartIndex = 0
 
     events.forEach((event, index) => {
-      // Event type 19 is a goal (based on actual data)
-      if (event.event_type === 19) {
+      // Event type 19 is a goal, 23 is a callahan (scores for the OTHER team)
+      if (event.event_type === 19 || event.event_type === 23) {
         const pointEvents = events.slice(pointStartIndex, index + 1)
 
         points.push({
@@ -74,10 +74,20 @@ function GameDetail() {
         })
 
         // Update score based on which team scored
-        if (event.team === game.home_team_id) {
-          currentHomeScore++
+        if (event.event_type === 23) {
+          // Callahan: the team field is the offense (who threw it), so the OTHER team scores
+          if (event.team === game.home_team_id) {
+            currentAwayScore++
+          } else {
+            currentHomeScore++
+          }
         } else {
-          currentAwayScore++
+          // Regular goal
+          if (event.team === game.home_team_id) {
+            currentHomeScore++
+          } else {
+            currentAwayScore++
+          }
         }
 
         pointStartIndex = index + 1
