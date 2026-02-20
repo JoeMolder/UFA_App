@@ -95,6 +95,20 @@ export interface TurnoverOriginsResponse {
   extent: [number, number, number, number];
 }
 
+export interface PullPlayThrow {
+  from_x: number;
+  from_y: number;
+  to_x: number;
+  to_y: number;
+}
+
+export interface PullPlayResponse {
+  throws: PullPlayThrow[];
+  sample_size: number;
+  pull_landing: { x: number; y: number };
+  scoring_rate: number;
+}
+
 export interface EmbeddingsResponse {
   players: string[];
   coordinates: number[][];
@@ -134,6 +148,12 @@ export const api = {
   // Get player list for predictions
   getPlayers: async (): Promise<string[]> => {
     const response = await apiClient.get<string[]>('/players');
+    return response.data;
+  },
+
+  // Get team list
+  getTeams: async (): Promise<string[]> => {
+    const response = await apiClient.get<string[]>('/teams');
     return response.data;
   },
 
@@ -185,10 +205,14 @@ export const api = {
     player?: string,
     gridX = 50,
     gridY = 60,
-    smooth = 2.0
+    smooth = 2.0,
+    team?: string,
+    opponent?: string
   ): Promise<TurnoverOriginsResponse> => {
     const params: Record<string, string | number> = { grid_x: gridX, grid_y: gridY, smooth };
     if (player) params.player = player;
+    if (team) params.team = team;
+    if (opponent) params.opponent = opponent;
     const response = await apiClient.get<TurnoverOriginsResponse>('/heatmap/turnover-origins', { params });
     return response.data;
   },
@@ -228,6 +252,19 @@ export const api = {
     const response = await apiClient.get<PredictionResponse>('/predict/blocks', {
       params: { x, y, grid_size: gridSize },
     });
+    return response.data;
+  },
+
+  // Get pull play sequence (expected throws after a pull)
+  getPullPlaySequence: async (
+    pullX: number,
+    pullY: number,
+    team?: string,
+    radius = 15
+  ): Promise<PullPlayResponse> => {
+    const params: Record<string, string | number> = { pull_x: pullX, pull_y: pullY, radius };
+    if (team) params.team = team;
+    const response = await apiClient.get<PullPlayResponse>('/pull-play/sequence', { params });
     return response.data;
   },
 

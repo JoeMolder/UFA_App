@@ -121,6 +121,21 @@ function Home() {
         >
           Turnover Heatmap
         </button>
+        <button
+          onClick={() => navigate('/pull-plays')}
+          style={{
+            padding: '10px 20px',
+            fontSize: '15px',
+            backgroundColor: '#14b8a6',
+            color: 'white',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            marginLeft: '10px',
+          }}
+        >
+          Pull Plays
+        </button>
       </div>
 
       {stats && (

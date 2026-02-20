@@ -240,7 +240,7 @@ from sklearn.preprocessing import StandardScaler
 _player_stats: Dict[str, Dict[str, float]] = {}
 _cluster_summaries: Dict[int, Dict[str, float]] = {}
 
-STATS_FEATURES = ['completion_pct', 'avg_throw_dist', 'avg_throw_depth', 'huck_rate', 'goal_pct', 'total_throws', 'avg_lateral_dist', 'avg_dist_from_center']
+STATS_FEATURES = ['completion_pct', 'avg_throw_dist', 'avg_throw_depth', 'huck_rate', 'goal_pct', 'avg_lateral_dist', 'avg_dist_from_center']
 
 try:
     # 1. Compute per-player stats from database
@@ -322,9 +322,9 @@ try:
 
         # 4. K-Means clustering on normalized stats
         from sklearn.cluster import KMeans
-        kmeans = KMeans(n_clusters=6, random_state=42, n_init=10)
+        kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
         _cluster_labels = kmeans.fit_predict(stats_normalized)
-        print(f"K-Means: 6 clusters, sizes: {[int((_cluster_labels == i).sum()) for i in range(6)]}")
+        print(f"K-Means: 4 clusters, sizes: {[int((_cluster_labels == i).sum()) for i in range(4)]}")
 
         # 5. Compute cluster summaries
         for cluster_id in set(_cluster_labels.tolist()):
@@ -553,6 +553,18 @@ def get_players() -> List[str]:
     if not _player_names:
         raise HTTPException(status_code=503, detail="Model not loaded")
     return _player_names
+
+
+@app.get("/teams")
+def get_teams() -> List[str]:
+    """Get list of all team names."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT team FROM events ORDER BY team")
+    teams = [row['team'] for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return teams
 
 
 @app.get("/embeddings/players")
@@ -951,6 +963,8 @@ def get_throwaway_heatmap_batch(
 @app.get("/heatmap/turnover-origins")
 def get_turnover_origins(
     player: Optional[str] = Query(None, description="Player name to filter by (omit for all players)"),
+    team: Optional[str] = Query(None, description="Team name to filter by (throwing team)"),
+    opponent: Optional[str] = Query(None, description="Opponent team to filter by"),
     grid_x: int = Query(50, ge=10, le=200, description="Grid bins across field width"),
     grid_y: int = Query(60, ge=10, le=200, description="Grid bins across field length"),
     smooth: float = Query(2.0, ge=0, le=10, description="Gaussian smoothing sigma"),
@@ -960,8 +974,19 @@ def get_turnover_origins(
         conn = get_db_connection()
         cur = conn.cursor()
 
-        player_filter = " AND e.thrower = %s" if player else ""
-        params = (player,) if player else ()
+        # Build dynamic filters
+        filters = []
+        params: list = []
+        if player:
+            filters.append("AND e.thrower = %s")
+            params.append(player)
+        if team:
+            filters.append("AND e.team = %s")
+            params.append(team)
+        if opponent:
+            filters.append("AND CASE WHEN e.team = g.home_team_id THEN g.away_team_id ELSE g.home_team_id END = %s")
+            params.append(opponent)
+        filter_sql = " ".join(filters)
 
         # All throws (completions 18, goals 19, drops 20, throwaways 22),
         # direction-normalized so all throws attack toward y=110.
@@ -976,7 +1001,7 @@ def get_turnover_origins(
                 WHERE e.event_type IN (18, 19, 20, 22)
                   AND e.thrower_x IS NOT NULL
                   AND e.thrower_y IS NOT NULL
-                  {player_filter}
+                  {filter_sql}
             ) sub
             WHERE y >= 0 AND y <= 100
         """, params)
@@ -993,7 +1018,7 @@ def get_turnover_origins(
                 WHERE e.event_type IN (20, 22)
                   AND e.thrower_x IS NOT NULL
                   AND e.thrower_y IS NOT NULL
-                  {player_filter}
+                  {filter_sql}
             ) sub
             WHERE y >= 0 AND y <= 100
         """, params)
@@ -1042,6 +1067,118 @@ def get_turnover_origins(
             "total_throws": len(all_throw_rows),
             "total_turnovers": len(turnover_rows),
             "extent": [-25, 25, 0, 120],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/pull-play/sequence")
+def get_pull_play_sequence(
+    pull_x: float = Query(0.0, description="Pull landing X position (-25 to 25)"),
+    pull_y: float = Query(90.0, description="Pull landing Y position (0 to 120)"),
+    team: Optional[str] = Query(None, description="Receiving team (omit for all teams)"),
+    radius: float = Query(15.0, ge=1, le=50, description="Search radius in yards around pull landing"),
+) -> Dict[str, Any]:
+    """Return average first 3 throws after a pull landing near the given position."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        team_filter = "AND recv_team = %s" if team else ""
+        params: list = [pull_x, pull_y, radius]
+        if team:
+            params.append(team)
+
+        cur.execute(f"""
+            WITH pull_data AS (
+                SELECT
+                    p.game_id, p.event_number AS pull_num,
+                    CASE WHEN recv.team = g.away_team_id THEN -p.pull_x ELSE p.pull_x END AS norm_pull_x,
+                    CASE WHEN recv.team = g.away_team_id THEN 120 - p.pull_y ELSE p.pull_y END AS norm_pull_y,
+                    recv.team AS recv_team,
+                    CASE WHEN recv.team = g.away_team_id THEN TRUE ELSE FALSE END AS is_away
+                FROM events p
+                JOIN games g ON p.game_id = g.game_id
+                JOIN events recv ON p.game_id = recv.game_id
+                    AND recv.event_number = p.event_number + 1
+                    AND recv.event_type IN (18, 19, 20, 22)
+                WHERE p.event_type = 7
+                  AND p.pull_x IS NOT NULL AND p.pull_y IS NOT NULL
+            ),
+            nearby_pulls AS (
+                SELECT *
+                FROM pull_data
+                WHERE SQRT(POWER(norm_pull_x - %s, 2) + POWER(norm_pull_y - %s, 2)) <= %s
+                {team_filter}
+            ),
+            throw_sequences AS (
+                SELECT
+                    np.game_id, np.pull_num, np.is_away,
+                    CASE WHEN np.is_away THEN -e1.thrower_x ELSE e1.thrower_x END AS t1_fx,
+                    CASE WHEN np.is_away THEN 120 - e1.thrower_y ELSE e1.thrower_y END AS t1_fy,
+                    CASE WHEN np.is_away THEN -e1.receiver_x ELSE e1.receiver_x END AS t1_tx,
+                    CASE WHEN np.is_away THEN 120 - e1.receiver_y ELSE e1.receiver_y END AS t1_ty,
+                    CASE WHEN np.is_away THEN -e2.thrower_x ELSE e2.thrower_x END AS t2_fx,
+                    CASE WHEN np.is_away THEN 120 - e2.thrower_y ELSE e2.thrower_y END AS t2_fy,
+                    CASE WHEN np.is_away THEN -e2.receiver_x ELSE e2.receiver_x END AS t2_tx,
+                    CASE WHEN np.is_away THEN 120 - e2.receiver_y ELSE e2.receiver_y END AS t2_ty,
+                    CASE WHEN np.is_away THEN -e3.thrower_x ELSE e3.thrower_x END AS t3_fx,
+                    CASE WHEN np.is_away THEN 120 - e3.thrower_y ELSE e3.thrower_y END AS t3_fy,
+                    CASE WHEN np.is_away THEN -e3.receiver_x ELSE e3.receiver_x END AS t3_tx,
+                    CASE WHEN np.is_away THEN 120 - e3.receiver_y ELSE e3.receiver_y END AS t3_ty,
+                    EXISTS (
+                        SELECT 1 FROM events eg
+                        WHERE eg.game_id = np.game_id
+                          AND eg.event_number > np.pull_num
+                          AND eg.event_number <= np.pull_num + 30
+                          AND eg.event_type = 19
+                          AND eg.team = e1.team
+                    ) AS scored
+                FROM nearby_pulls np
+                JOIN events e1 ON np.game_id = e1.game_id AND e1.event_number = np.pull_num + 1
+                JOIN events e2 ON np.game_id = e2.game_id AND e2.event_number = np.pull_num + 2
+                JOIN events e3 ON np.game_id = e3.game_id AND e3.event_number = np.pull_num + 3
+                WHERE e1.event_type IN (18, 19) AND e1.receiver_x IS NOT NULL
+                  AND e2.event_type IN (18, 19) AND e2.receiver_x IS NOT NULL
+                  AND e3.event_type IN (18, 19) AND e3.receiver_x IS NOT NULL
+                  AND e1.team = e2.team AND e2.team = e3.team
+            )
+            SELECT
+                AVG(t1_fx) AS t1_fx, AVG(t1_fy) AS t1_fy, AVG(t1_tx) AS t1_tx, AVG(t1_ty) AS t1_ty,
+                AVG(t2_fx) AS t2_fx, AVG(t2_fy) AS t2_fy, AVG(t2_tx) AS t2_tx, AVG(t2_ty) AS t2_ty,
+                AVG(t3_fx) AS t3_fx, AVG(t3_fy) AS t3_fy, AVG(t3_tx) AS t3_tx, AVG(t3_ty) AS t3_ty,
+                COUNT(*) AS sample_size,
+                AVG(CASE WHEN scored THEN 1.0 ELSE 0.0 END) AS scoring_rate
+            FROM throw_sequences
+        """, params)
+
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row or row['sample_size'] == 0:
+            return {
+                "throws": [],
+                "sample_size": 0,
+                "pull_landing": {"x": pull_x, "y": pull_y},
+                "scoring_rate": 0,
+            }
+
+        return {
+            "throws": [
+                {"from_x": round(float(row['t1_fx']), 1), "from_y": round(float(row['t1_fy']), 1),
+                 "to_x": round(float(row['t1_tx']), 1), "to_y": round(float(row['t1_ty']), 1)},
+                {"from_x": round(float(row['t2_fx']), 1), "from_y": round(float(row['t2_fy']), 1),
+                 "to_x": round(float(row['t2_tx']), 1), "to_y": round(float(row['t2_ty']), 1)},
+                {"from_x": round(float(row['t3_fx']), 1), "from_y": round(float(row['t3_fy']), 1),
+                 "to_x": round(float(row['t3_tx']), 1), "to_y": round(float(row['t3_ty']), 1)},
+            ],
+            "sample_size": int(row['sample_size']),
+            "pull_landing": {"x": pull_x, "y": pull_y},
+            "scoring_rate": round(float(row['scoring_rate']), 3),
         }
 
     except HTTPException:

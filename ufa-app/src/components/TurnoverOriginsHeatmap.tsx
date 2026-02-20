@@ -35,6 +35,10 @@ function TurnoverOriginsHeatmap() {
   const [searchQuery, setSearchQuery] = useState('')
   const [showDropdown, setShowDropdown] = useState(false)
 
+  const [teams, setTeams] = useState<string[]>([])
+  const [selectedTeam, setSelectedTeam] = useState(ALL_PLAYERS)
+  const [selectedOpponent, setSelectedOpponent] = useState(ALL_PLAYERS)
+
   const CANVAS_WIDTH = 900
   const CANVAS_HEIGHT = 400
   const PADDING = 50
@@ -67,19 +71,22 @@ function TurnoverOriginsHeatmap() {
     [fieldTop, fieldHeight]
   )
 
-  // Fetch player list on mount
+  // Fetch player and team lists on mount
   useEffect(() => {
     api.getPlayers().then(setPlayers).catch(() => {})
+    api.getTeams().then(setTeams).catch(() => {})
   }, [])
 
-  // Fetch heatmap data when player changes
+  // Fetch heatmap data when filters change
   useEffect(() => {
     let cancelled = false
     const fetchData = async () => {
       try {
         setLoading(true)
         const player = selectedPlayer === ALL_PLAYERS ? undefined : selectedPlayer
-        const result = await api.getTurnoverOrigins(player, 50, 60, 2.0)
+        const team = selectedTeam === ALL_PLAYERS ? undefined : selectedTeam
+        const opponent = selectedOpponent === ALL_PLAYERS ? undefined : selectedOpponent
+        const result = await api.getTurnoverOrigins(player, 50, 60, 2.0, team, opponent)
         if (!cancelled) {
           setData(result)
           setLoading(false)
@@ -93,7 +100,7 @@ function TurnoverOriginsHeatmap() {
     }
     fetchData()
     return () => { cancelled = true }
-  }, [selectedPlayer])
+  }, [selectedPlayer, selectedTeam, selectedOpponent])
 
   const handlePlayerSelect = (player: string) => {
     setSelectedPlayer(player)
@@ -364,9 +371,58 @@ function TurnoverOriginsHeatmap() {
         )}
       </div>
 
-      {/* Selected player label */}
+      {/* Team filters */}
+      <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+        <label style={{ color: '#aaa', fontSize: '13px', fontFamily: 'monospace' }}>
+          Team:
+          <select
+            value={selectedTeam}
+            onChange={(e) => setSelectedTeam(e.target.value)}
+            style={{
+              marginLeft: '6px',
+              padding: '6px 8px',
+              fontSize: '13px',
+              borderRadius: '6px',
+              border: '1px solid #555',
+              backgroundColor: '#2a2a3e',
+              color: 'white',
+            }}
+          >
+            <option value={ALL_PLAYERS}>All Teams</option>
+            {teams.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+        </label>
+        <label style={{ color: '#aaa', fontSize: '13px', fontFamily: 'monospace' }}>
+          Opponent:
+          <select
+            value={selectedOpponent}
+            onChange={(e) => setSelectedOpponent(e.target.value)}
+            style={{
+              marginLeft: '6px',
+              padding: '6px 8px',
+              fontSize: '13px',
+              borderRadius: '6px',
+              border: '1px solid #555',
+              backgroundColor: '#2a2a3e',
+              color: 'white',
+            }}
+          >
+            <option value={ALL_PLAYERS}>All Opponents</option>
+            {teams.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {/* Selected filter label */}
       <div style={{ color: 'white', fontSize: '16px', fontWeight: 'bold' }}>
-        {selectedPlayer === ALL_PLAYERS ? 'All Players' : selectedPlayer} — Turnover Origins
+        {selectedPlayer === ALL_PLAYERS ? 'All Players' : selectedPlayer}
+        {selectedTeam !== ALL_PLAYERS && ` (${selectedTeam})`}
+        {selectedOpponent !== ALL_PLAYERS && ` vs ${selectedOpponent}`}
+        {' — Turnover Origins'}
       </div>
 
       {loading ? (

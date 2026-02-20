@@ -22,6 +22,7 @@ interface PlayerEmbeddingsProps {
 const WIDTH = 900
 const HEIGHT = 600
 const MARGIN = { top: 20, right: 20, bottom: 20, left: 20 }
+const INFO_PANEL_WIDTH = 200
 
 // Distinct colors for clusters, -1 (noise) gets gray
 const CLUSTER_COLORS = [
@@ -41,6 +42,10 @@ function PlayerEmbeddings({ players, coordinates, clusters, playerStats, cluster
   const svgRef = useRef<SVGSVGElement>(null)
   const zoomRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null)
   const [hoveredPlayer, setHoveredPlayer] = useState<string | null>(null)
+  const [pinnedPlayer, setPinnedPlayer] = useState<string | null>(null)
+
+  // The player shown in the side panel: pinned takes priority, then hovered
+  const displayedPlayer = pinnedPlayer ?? hoveredPlayer
 
   // Build data array
   const data: PlayerData[] = players.map((name, i) => ({
@@ -118,7 +123,10 @@ function PlayerEmbeddings({ players, coordinates, clusters, playerStats, cluster
           .attr('fill-opacity', isSelected ? 1 : isNeighbor ? 0.9 : 0.8)
         setHoveredPlayer(null)
       })
-      .on('click', (_, d) => {
+      .on('click', (event, d) => {
+        event.stopPropagation()
+        // Toggle pin: click same player to unpin, click different to pin
+        setPinnedPlayer((prev) => (prev === d.name ? null : d.name))
         onPlayerClick?.(d.name)
       })
 
@@ -222,104 +230,119 @@ function PlayerEmbeddings({ players, coordinates, clusters, playerStats, cluster
   }, [selectedPlayer, data, getNeighbors])
 
   return (
-    <div style={{ position: 'relative' }}>
-      <svg
-        ref={svgRef}
-        width={WIDTH}
-        height={HEIGHT}
-        style={{
-          backgroundColor: '#1a1a2e',
-          borderRadius: '8px',
-          maxWidth: '100%',
-          height: 'auto',
-          cursor: 'grab',
-        }}
-        viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-      />
+    <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start' }}>
+      {/* Graph */}
+      <div style={{ position: 'relative', flex: '1 1 auto', minWidth: 0 }}>
+        <svg
+          ref={svgRef}
+          width={WIDTH}
+          height={HEIGHT}
+          style={{
+            backgroundColor: '#1a1a2e',
+            borderRadius: '8px',
+            maxWidth: '100%',
+            height: 'auto',
+            cursor: 'grab',
+          }}
+          viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+          onClick={() => setPinnedPlayer(null)}
+        />
 
-      {/* Cluster legend with stats */}
-      <div
-        style={{
-          position: 'absolute',
-          bottom: 12,
-          left: 12,
-          backgroundColor: 'rgba(0,0,0,0.8)',
-          padding: '10px 14px',
-          borderRadius: '6px',
-          maxHeight: '180px',
-          overflowY: 'auto',
-          fontSize: '11px',
-          fontFamily: 'monospace',
-        }}
-      >
-        {uniqueClusters.map((c) => {
-          const summary = clusterSummaries[String(c)]
-          return (
-            <div key={c} style={{ marginBottom: '6px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
-                <div
-                  style={{
-                    width: 10,
-                    height: 10,
-                    borderRadius: '50%',
-                    backgroundColor: getClusterColor(c),
-                    flexShrink: 0,
-                  }}
-                />
-                <span style={{ color: 'white', fontWeight: 'bold' }}>
-                  C{c} ({summary?.count ?? '?'} players)
-                </span>
-              </div>
-              {summary && (
-                <div style={{ color: '#aaa', paddingLeft: '14px', lineHeight: '1.4' }}>
-                  {summary.avg_total_throws} throws · {summary.avg_completion_pct}% comp · {summary.avg_throw_dist}yd dist · {summary.avg_throw_depth}yd depth · {summary.avg_huck_rate}% huck · {summary.avg_lateral_dist}yd lateral
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Hover tooltip with player stats */}
-      {hoveredPlayer && (
+        {/* Cluster legend with stats */}
         <div
           style={{
             position: 'absolute',
-            top: 8,
-            right: 8,
-            backgroundColor: 'rgba(0,0,0,0.9)',
-            color: 'white',
-            padding: '8px 12px',
-            borderRadius: '4px',
-            fontSize: '13px',
+            bottom: 12,
+            left: 12,
+            backgroundColor: 'rgba(0,0,0,0.8)',
+            padding: '10px 14px',
+            borderRadius: '6px',
+            maxHeight: '180px',
+            overflowY: 'auto',
+            fontSize: '11px',
             fontFamily: 'monospace',
-            pointerEvents: 'none',
-            minWidth: '180px',
           }}
         >
-          <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
-            {hoveredPlayer}
-            <span style={{ color: '#888', marginLeft: '8px', fontWeight: 'normal' }}>
-              {(() => {
-                const p = data.find((d) => d.name === hoveredPlayer)
-                return p && p.cluster >= 0 ? `C${p.cluster}` : 'noise'
-              })()}
-            </span>
-          </div>
-          {playerStats[hoveredPlayer] && (
-            <div style={{ color: '#ccc', lineHeight: '1.5', fontSize: '11px' }}>
-              <div>{playerStats[hoveredPlayer].total_throws} throws</div>
-              <div>{playerStats[hoveredPlayer].completion_pct}% completion</div>
-              <div>{playerStats[hoveredPlayer].avg_throw_dist}yd avg dist</div>
-              <div>{playerStats[hoveredPlayer].avg_throw_depth}yd avg depth</div>
-              <div>{playerStats[hoveredPlayer].huck_rate}% huck rate</div>
-              <div>{playerStats[hoveredPlayer].goal_pct}% goal rate</div>
-              <div>{playerStats[hoveredPlayer].avg_lateral_dist}yd lateral</div>
-              <div>{playerStats[hoveredPlayer].avg_dist_from_center}yd from center</div>
-            </div>
-          )}
+          {uniqueClusters.map((c) => {
+            const summary = clusterSummaries[String(c)]
+            return (
+              <div key={c} style={{ marginBottom: '6px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
+                  <div
+                    style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: '50%',
+                      backgroundColor: getClusterColor(c),
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span style={{ color: 'white', fontWeight: 'bold' }}>
+                    C{c} ({summary?.count ?? '?'} players)
+                  </span>
+                </div>
+                {summary && (
+                  <div style={{ color: '#aaa', paddingLeft: '14px', lineHeight: '1.4' }}>
+                    {summary.avg_total_throws} throws · {summary.avg_completion_pct}% comp · {summary.avg_throw_dist}yd dist · {summary.avg_throw_depth}yd depth · {summary.avg_huck_rate}% huck · {summary.avg_lateral_dist}yd lateral
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
-      )}
+      </div>
+
+      {/* Side panel — player stats */}
+      <div
+        style={{
+          width: `${INFO_PANEL_WIDTH}px`,
+          flexShrink: 0,
+          backgroundColor: '#1a1a2e',
+          borderRadius: '8px',
+          padding: '12px 14px',
+          fontFamily: 'monospace',
+          minHeight: '200px',
+          border: '1px solid #333',
+        }}
+      >
+        {displayedPlayer ? (
+          <>
+            <div style={{ fontWeight: 'bold', color: 'white', fontSize: '14px', marginBottom: '4px' }}>
+              {displayedPlayer}
+              <span style={{ color: '#888', marginLeft: '8px', fontWeight: 'normal', fontSize: '12px' }}>
+                {(() => {
+                  const p = data.find((d) => d.name === displayedPlayer)
+                  return p && p.cluster >= 0 ? `C${p.cluster}` : 'noise'
+                })()}
+              </span>
+            </div>
+            {pinnedPlayer && (
+              <div
+                onClick={() => setPinnedPlayer(null)}
+                style={{ color: '#888', fontSize: '10px', cursor: 'pointer', marginBottom: '6px' }}
+              >
+                click to unpin
+              </div>
+            )}
+            {playerStats[displayedPlayer] && (
+              <div style={{ color: '#ccc', lineHeight: '1.6', fontSize: '11px' }}>
+                <div>{playerStats[displayedPlayer].total_throws} throws</div>
+                <div>{playerStats[displayedPlayer].completion_pct}% completion</div>
+                <div>{playerStats[displayedPlayer].avg_throw_dist}yd avg dist</div>
+                <div>{playerStats[displayedPlayer].avg_throw_depth}yd avg depth</div>
+                <div>{playerStats[displayedPlayer].huck_rate}% huck rate</div>
+                <div>{playerStats[displayedPlayer].goal_pct}% goal rate</div>
+                <div>{playerStats[displayedPlayer].avg_lateral_dist}yd lateral</div>
+                <div>{playerStats[displayedPlayer].avg_dist_from_center}yd from center</div>
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ color: '#555', fontSize: '12px', textAlign: 'center', paddingTop: '80px' }}>
+            Hover or click a player
+          </div>
+        )}
+      </div>
     </div>
   )
 }

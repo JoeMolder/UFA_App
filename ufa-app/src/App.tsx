@@ -5,6 +5,7 @@ import GameDetail from './pages/GameDetail'
 import Prediction from './pages/Prediction'
 import Embeddings from './pages/Embeddings'
 import Turnovers from './pages/Turnovers'
+import PullPlays from './pages/PullPlays'
 
 function App() {
   return (
@@ -15,6 +16,7 @@ function App() {
         <Route path="/predict" element={<Prediction />} />
         <Route path="/embeddings" element={<Embeddings />} />
         <Route path="/turnovers" element={<Turnovers />} />
+        <Route path="/pull-plays" element={<PullPlays />} />
       </Routes>
     </Router>
   )
