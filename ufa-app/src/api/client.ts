@@ -104,9 +104,59 @@ export interface PullPlayThrow {
 
 export interface PullPlayResponse {
   throws: PullPlayThrow[];
-  sample_size: number;
+  sample_size: number | null;
   pull_landing: { x: number; y: number };
-  scoring_rate: number;
+  scoring_rate: number | null;
+  mode?: string;
+}
+
+export interface PullPlaySampleResponse {
+  sequences: PullPlayThrow[][];
+  pull_landing: { x: number; y: number };
+  n_samples: number;
+  team: string | null;
+}
+
+export interface PullPlayCluster {
+  cluster_id: number;
+  throws: PullPlayThrow[];
+  count: number;
+  frequency: number;
+}
+
+export interface PullPlayClustersResponse {
+  clusters: PullPlayCluster[];
+  n_clusters: number;
+}
+
+export interface PullPlayHotspot {
+  x: number;
+  y: number;
+  count: number;
+  relative_freq: number;
+}
+
+export interface ZoneThrow {
+  from_x: number; from_y: number;
+  to_x: number;   to_y: number;
+}
+
+export interface FieldZone {
+  zone_id: number;
+  col: number;
+  row: number;
+  x_range: [number, number];
+  y_range: [number, number];
+  count: number;
+  relative_density: number;
+  throws: ZoneThrow[];
+}
+
+export interface ZonePatternsResponse {
+  zones: FieldZone[];
+  zone_cols: number;
+  zone_rows: number;
+  total: number;
 }
 
 export interface EmbeddingsResponse {
@@ -115,6 +165,22 @@ export interface EmbeddingsResponse {
   clusters: number[];
   player_stats: Record<string, PlayerStats>;
   cluster_summaries: Record<string, ClusterSummary>;
+}
+
+export interface EPVResponse {
+  grid: number[][];
+  extent: [number, number, number, number];
+  throw_idx: number;
+}
+
+export interface CompletionHeatmapResponse {
+  grid: number[][];
+  extent: [number, number, number, number];
+}
+
+export interface CompletionPredictResponse {
+  probability: number;
+  thrower: string;
 }
 
 // API Functions
@@ -255,16 +321,104 @@ export const api = {
     return response.data;
   },
 
-  // Get pull play sequence (expected throws after a pull)
+  // Get pull play sequence (CVAE model or data average)
   getPullPlaySequence: async (
     pullX: number,
     pullY: number,
     team?: string,
+    mode: 'model' | 'average' = 'model',
     radius = 15
   ): Promise<PullPlayResponse> => {
-    const params: Record<string, string | number> = { pull_x: pullX, pull_y: pullY, radius };
+    const params: Record<string, string | number> = { pull_x: pullX, pull_y: pullY, radius, mode };
     if (team) params.team = team;
     const response = await apiClient.get<PullPlayResponse>('/pull-play/sequence', { params });
+    return response.data;
+  },
+
+  // Sample multiple play sequences from the CVAE latent space
+  samplePullPlays: async (
+    pullX: number,
+    pullY: number,
+    team?: string,
+    nSamples = 5
+  ): Promise<PullPlaySampleResponse> => {
+    const params: Record<string, string | number> = { pull_x: pullX, pull_y: pullY, n_samples: nSamples };
+    if (team) params.team = team;
+    const response = await apiClient.get<PullPlaySampleResponse>('/pull-play/sample', { params });
+    return response.data;
+  },
+
+  // Get common play archetypes decoded conditioned on a specific pull landing
+  getPullPlayClusters: async (
+    pullX: number,
+    pullY: number,
+    team?: string
+  ): Promise<PullPlayClustersResponse> => {
+    const params: Record<string, string | number> = { pull_x: pullX, pull_y: pullY };
+    if (team) params.team = team;
+    const response = await apiClient.get<PullPlayClustersResponse>('/pull-play/clusters', { params });
+    return response.data;
+  },
+
+  // Get zone-level possession start patterns (pulls + turnovers)
+  getZonePatterns: async (team?: string, zoneCols = 4, zoneRows = 3): Promise<ZonePatternsResponse> => {
+    const params: Record<string, string | number> = { zone_cols: zoneCols, zone_rows: zoneRows };
+    if (team) params.team = team;
+    const response = await apiClient.get<ZonePatternsResponse>('/possession/zone-patterns', { params });
+    return response.data;
+  },
+
+  // Get most common pull landing positions (hotspots) for a team or all teams
+  getPullPlayHotspots: async (team?: string): Promise<PullPlayHotspot[]> => {
+    const params: Record<string, string> = {};
+    if (team) params.team = team;
+    const response = await apiClient.get<{ hotspots: PullPlayHotspot[] }>('/pull-play/hotspots', { params });
+    return response.data.hotspots;
+  },
+
+  // Get EPV (Expected Possession Value) heatmap
+  getEPVHeatmap: async (
+    throwIdx: number,
+    team?: string,
+    model: 'xgb' | 'nn' = 'xgb',
+    quarter?: number
+  ): Promise<EPVResponse> => {
+    const params: Record<string, string | number> = { throw_idx: throwIdx, model };
+    if (team) params.team = team;
+    if (quarter) params.quarter = quarter;
+    const response = await apiClient.get<EPVResponse>('/epv/heatmap', { params });
+    return response.data;
+  },
+
+  // Get list of throwers in the completion model
+  getCompletionThrowers: async (): Promise<string[]> => {
+    const response = await apiClient.get<string[]>('/completion/throwers');
+    return response.data;
+  },
+
+  // Get completion probability heatmap from a given origin
+  getCompletionHeatmap: async (
+    thrower: string,
+    fromX: number,
+    fromY: number
+  ): Promise<CompletionHeatmapResponse> => {
+    const response = await apiClient.get<CompletionHeatmapResponse>('/completion/heatmap', {
+      params: { thrower, from_x: fromX, from_y: fromY },
+    });
+    return response.data;
+  },
+
+  // Get completion probability for a single throw
+  getCompletionPredict: async (
+    thrower: string,
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number
+  ): Promise<CompletionPredictResponse> => {
+    const response = await apiClient.get<CompletionPredictResponse>('/completion/predict', {
+      params: { thrower, from_x: fromX, from_y: fromY, to_x: toX, to_y: toY },
+    });
     return response.data;
   },
 

@@ -10,7 +10,59 @@ Models
 5. Player similarity
 6. Possession generation
 
+There might be some cool huck percentage calculation we
+can do where you put one point and then the other
+
+Defender characteristics
+
+Need to review pull play model or get rid of it
+Maybe it would be more useful to predict players than the actual throws
+
 Other Ideas:
 Where d’s occur, this could be per player too
 Where d’s are thrown from, "     "
 Where goals are scored / thrown from, "     "
+
+Some more complex options:
+
+Sequence Model (LSTM/Transformer) — Treat each possession as a sequence of (x, y) tokens. Condition on pull landing position + team, then autoregressively generate throw destinations. A transformer with positional encoding for throw number could capture long-range dependencies (e.g., first throw influences the third). This would handle variable-length possessions naturally and could model the full distribution via sampling.
+
+Conditional VAE — Learn a latent space of "play archetypes." Encode full possessions into a latent vector, then decode conditioned on pull landing. The latent space would organize play types — you could sample different z values to see distinct strategic options a team has from a given pull position, rather than just the average.
+
+Inverse Reinforcement Learning — Model each team's offense as a policy optimizing an unknown reward function. IRL would recover what each team values (field position gain vs. lateral movement vs. risk tolerance). You could then compare team "reward functions" — e.g., does Empire value sideline possession more than Royal? Could also simulate counterfactual strategies.
+
+Conditional Normalizing Flow (per throw step) — You already have the nflows infrastructure. Train a flow conditioned on (pull_x, pull_y, team) for throw 1 destination, then another flow conditioned on throw 1 destination for throw 2, etc. This gives exact density estimation at each step with full spatial resolution — essentially a continuous-state Markov chain with neural density estimators for transitions.
+
+Graph Neural Network on play structure — Model players as nodes, throws as directed edges on a spatial graph. A GNN could learn team formation patterns and predict likely passing structures rather than just positions.
+
+The conditional normalizing flow chain would probably integrate most naturally since you already have the nflows pipeline and it gives the richest spatial output. The inverse RL is the most ambitious but could yield the most unique insights. What appeals to you?
+
+2) Throw-level “Expected Possession Value” (most useful for visuals)
+Instead of predicting only at possession start, predict value after every throw:
+V(s) = P(score before turnover | current state s)
+Where state s could be:
+disc location (x,y)
+throw count / stall proxy (throw index)
+previous throw vector (dx, dy)
+which 7 are on the field (lineup) -- might be able to consider defenders too
+optionally: who currently has disc (thrower)
+Model: same as above, but trained on snapshots.
+Labeling trick (simple + effective):
+For any state within a possession that eventually scores: label 1
+If possession turns: label 0
+(Optionally discount by time/throws later.)
+Visualization payoff: you can color the field by V(x,y) for a given lineup/player/team.
+
+1) Possession-level scoring probability (fastest to build)
+Goal: For each possession (or each “startup”: first 3 throws after receiving pull), predict:
+P(score on this possession | context, lineup, initial field position)
+Features you already have / can derive
+Start-of-possession disc position (x0, y0)
+Pull type / pull landing (if you have it)
+Offense/defense team IDs
+Lineup (7 player IDs)
+Model options
+Baseline: Logistic Regression / XGBoost on engineered features + player one-hot / embeddings
+Better: Lineup set encoder (DeepSets / Set Transformer) + MLP → p_score
+This one is great for “line synergy”: a lineup that boosts P(score) relative to baseline is synergistic.
+Why this generalizes to unseen lines: you’re combining player embeddings, not memorizing line IDs.

@@ -232,6 +232,158 @@ try:
 except Exception as e:
     print(f"Warning: Could not load completion flow model: {e}")
 
+# Load pull play CVAE model
+class PullPlayCVAE(nn.Module):
+    """Conditional VAE for pull play sequences (with z-skip decoder)."""
+    def __init__(self, n_teams, seq_dim=12, latent_dim=16,
+                 team_embed_dim=8, condition_dim=16, hidden_dim=128):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.seq_dim = seq_dim
+        self.team_embedding = nn.Embedding(n_teams + 1, team_embed_dim)
+        self.condition_net = nn.Sequential(
+            nn.Linear(2 + team_embed_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, condition_dim),
+        )
+        self.encoder = nn.Sequential(
+            nn.Linear(seq_dim + condition_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_log_var = nn.Linear(hidden_dim, latent_dim)
+        # Decoder with z injected at two layers to prevent posterior collapse
+        self.decoder_fc1 = nn.Sequential(
+            nn.Linear(latent_dim + condition_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.decoder_fc2 = nn.Sequential(
+            nn.Linear(hidden_dim + latent_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.decoder_out = nn.Sequential(
+            nn.Linear(hidden_dim, seq_dim),
+            nn.Sigmoid(),
+        )
+
+    def get_condition(self, pull_pos, team_ids):
+        team_emb = self.team_embedding(team_ids)
+        combined = torch.cat([pull_pos, team_emb], dim=1)
+        return self.condition_net(combined)
+
+    def decode(self, z, condition):
+        h = self.decoder_fc1(torch.cat([z, condition], dim=1))
+        h = self.decoder_fc2(torch.cat([h, z], dim=1))
+        return self.decoder_out(h)
+
+    def sample(self, pull_pos, team_ids, n_samples=1):
+        self.eval()
+        with torch.no_grad():
+            condition = self.get_condition(pull_pos, team_ids)
+            condition = condition.repeat(n_samples, 1)
+            z = torch.randn(n_samples, self.latent_dim)
+            return self.decode(z, condition)
+
+
+CVAE_MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "pull_play_cvae.pkl"
+
+_cvae_model: Optional[PullPlayCVAE] = None
+_cvae_team_encoder = None
+_cvae_cluster_centers: Optional[np.ndarray] = None  # [K, latent_dim] latent centers
+_cvae_cluster_counts: Optional[np.ndarray] = None   # [K] sequence counts
+
+try:
+    cvae_save = joblib.load(CVAE_MODEL_PATH)
+    cvae_hp = cvae_save["hyperparameters"]
+    _cvae_team_encoder = cvae_save["team_encoder"]
+
+    _cvae_model = PullPlayCVAE(
+        n_teams=cvae_save["n_real_teams"],
+        seq_dim=cvae_hp["seq_dim"],
+        latent_dim=cvae_hp["latent_dim"],
+        team_embed_dim=cvae_hp["team_embed_dim"],
+        condition_dim=cvae_hp["condition_dim"],
+        hidden_dim=cvae_hp["hidden_dim"],
+    )
+    _cvae_model.load_state_dict(cvae_save["model_state_dict"])
+    _cvae_model.eval()
+
+    if "kmeans" in cvae_save:
+        _cvae_cluster_centers = cvae_save["kmeans"].cluster_centers_  # [K, latent_dim]
+        _cvae_cluster_counts = cvae_save["cluster_counts"]
+        print(f"Pull play CVAE loaded ({len(_cvae_cluster_centers)} cluster archetypes)")
+    else:
+        print("Pull play CVAE loaded (no cluster data)")
+except Exception as e:
+    print(f"Warning: Could not load pull play CVAE: {e}")
+
+
+# Load EPV (Expected Possession Value) models
+class EPVNet(nn.Module):
+    """Small neural net for EPV prediction. Must match training notebook architecture."""
+    def __init__(self, input_dim=6):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        return self.net(x).squeeze(1)
+
+
+EPV_XGB_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "epv_xgb.pkl"
+EPV_NN_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "epv_nn.pkl"
+
+_epv_xgb = None
+_epv_nn: Optional[EPVNet] = None
+_epv_scaler = None
+_epv_team_encoder = None
+
+try:
+    epv_xgb_save = joblib.load(EPV_XGB_PATH)
+    _epv_xgb = epv_xgb_save["model"]
+    _epv_team_encoder = epv_xgb_save["team_encoder"]
+    print(f"EPV XGBoost loaded (AUC={epv_xgb_save['metrics']['auc']:.4f})")
+except Exception as e:
+    print(f"Warning: Could not load EPV XGBoost model: {e}")
+
+try:
+    epv_nn_save = joblib.load(EPV_NN_PATH)
+    _epv_scaler = epv_nn_save["scaler"]
+    if _epv_team_encoder is None:
+        _epv_team_encoder = epv_nn_save["team_encoder"]
+    _epv_nn = EPVNet(input_dim=epv_nn_save.get("input_dim", 6))
+    _epv_nn.load_state_dict(epv_nn_save["model_state_dict"])
+    _epv_nn.eval()
+    print(f"EPV Neural Net loaded (AUC={epv_nn_save['metrics']['auc']:.4f})")
+except Exception as e:
+    print(f"Warning: Could not load EPV neural net model: {e}")
+
+# Load completion XGBoost model (per-thrower P(completion | from, to))
+COMPLETION_XGB_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "completion_xgb.pkl"
+
+_completion_xgb = None
+_completion_thrower_encoder = None
+
+try:
+    completion_xgb_save = joblib.load(COMPLETION_XGB_PATH)
+    _completion_xgb = completion_xgb_save["model"]
+    _completion_thrower_encoder = completion_xgb_save["encoder"]
+    print(f"Completion XGBoost loaded (AUC={completion_xgb_save['metrics']['auc']:.4f}, {len(_completion_thrower_encoder.classes_)} throwers)")
+except Exception as e:
+    print(f"Warning: Could not load completion XGBoost model: {e}")
+
 # ---------------------------------------------------------------------------
 # Player Stats, UMAP, and Clustering (stats-based)
 # ---------------------------------------------------------------------------
@@ -1075,15 +1227,69 @@ def get_turnover_origins(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _cvae_predict(pull_x: float, pull_y: float, team: Optional[str], n_samples: int = 1) -> List[Dict]:
+    """Use CVAE to generate throw sequence(s). Returns list of sequences."""
+    if _cvae_model is None or _cvae_team_encoder is None:
+        raise HTTPException(status_code=503, detail="CVAE model not loaded")
+
+    pull_x_norm = (pull_x + 25) / 50
+    pull_y_norm = pull_y / 120
+    pull_tensor = torch.FloatTensor([[pull_x_norm, pull_y_norm]])
+
+    if team and team in _cvae_team_encoder.classes_:
+        team_id = int(_cvae_team_encoder.transform([team])[0]) + 1
+    else:
+        team_id = 0  # all-teams token
+    team_tensor = torch.LongTensor([team_id])
+
+    samples = _cvae_model.sample(pull_tensor, team_tensor, n_samples=n_samples).numpy()
+
+    def denorm(seq):
+        # x coords at indices 0,2,4,6,8,10: [0,1] -> [-25,25]
+        # y coords at indices 1,3,5,7,9,11: [0,1] -> [0,120]
+        result = seq.copy()
+        for i in [0, 2, 4, 6, 8, 10]:
+            result[i] = float(result[i]) * 50 - 25
+        for i in [1, 3, 5, 7, 9, 11]:
+            result[i] = float(result[i]) * 120
+        return result
+
+    sequences = []
+    for s in range(n_samples):
+        seq = denorm(samples[s])
+        sequences.append([
+            {"from_x": round(float(seq[0]), 1), "from_y": round(float(seq[1]), 1),
+             "to_x": round(float(seq[2]), 1), "to_y": round(float(seq[3]), 1)},
+            {"from_x": round(float(seq[4]), 1), "from_y": round(float(seq[5]), 1),
+             "to_x": round(float(seq[6]), 1), "to_y": round(float(seq[7]), 1)},
+            {"from_x": round(float(seq[8]), 1), "from_y": round(float(seq[9]), 1),
+             "to_x": round(float(seq[10]), 1), "to_y": round(float(seq[11]), 1)},
+        ])
+    return sequences
+
+
 @app.get("/pull-play/sequence")
 def get_pull_play_sequence(
     pull_x: float = Query(0.0, description="Pull landing X position (-25 to 25)"),
     pull_y: float = Query(90.0, description="Pull landing Y position (0 to 120)"),
     team: Optional[str] = Query(None, description="Receiving team (omit for all teams)"),
     radius: float = Query(15.0, ge=1, le=50, description="Search radius in yards around pull landing"),
+    mode: str = Query("model", description="'model' for CVAE prediction, 'average' for data average"),
 ) -> Dict[str, Any]:
-    """Return average first 3 throws after a pull landing near the given position."""
+    """Return first 3 throws after a pull landing using CVAE model or data average."""
     try:
+        # CVAE model mode
+        if mode == "model":
+            sequences = _cvae_predict(pull_x, pull_y, team, n_samples=1)
+            return {
+                "throws": sequences[0],
+                "sample_size": None,
+                "pull_landing": {"x": pull_x, "y": pull_y},
+                "scoring_rate": None,
+                "mode": "model",
+            }
+
+        # Data average mode
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -1179,10 +1385,543 @@ def get_pull_play_sequence(
             "sample_size": int(row['sample_size']),
             "pull_landing": {"x": pull_x, "y": pull_y},
             "scoring_rate": round(float(row['scoring_rate']), 3),
+            "mode": "average",
         }
 
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/pull-play/sample")
+def sample_pull_plays(
+    pull_x: float = Query(0.0, description="Pull landing X position (-25 to 25)"),
+    pull_y: float = Query(20.0, description="Pull landing Y position (0 to 120)"),
+    team: Optional[str] = Query(None, description="Receiving team (omit for all teams)"),
+    n_samples: int = Query(5, ge=1, le=20, description="Number of sequences to sample"),
+) -> Dict[str, Any]:
+    """Sample multiple distinct play sequences from the CVAE latent space."""
+    try:
+        sequences = _cvae_predict(pull_x, pull_y, team, n_samples=n_samples)
+        return {
+            "sequences": sequences,
+            "pull_landing": {"x": pull_x, "y": pull_y},
+            "n_samples": n_samples,
+            "team": team,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/possession/zone-patterns")
+def get_zone_patterns(
+    team: Optional[str] = Query(None, description="Receiving team (omit for all teams)"),
+    zone_cols: int = Query(4, ge=2, le=6),
+    zone_rows: int = Query(3, ge=2, le=5),
+) -> Dict[str, Any]:
+    """
+    Divide the playing field into a grid of zones. For each zone, compute the
+    average 3-throw sequence from all possession starts (pulls + turnovers)
+    that originate in that zone. Direction-normalized, offense attacks y=120.
+    """
+    tf = "AND off_team = %s" if team else ""
+    params: list = [team] if team else []
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(f"""
+        WITH poss_starts AS (
+            -- Possession starts after pulls: receiving team's first throw
+            SELECT
+                e2.game_id,
+                e2.event_number AS e1_num,
+                e2.team AS off_team,
+                CASE WHEN e2.team = g.away_team_id THEN TRUE ELSE FALSE END AS is_away
+            FROM events p
+            JOIN games g ON p.game_id = g.game_id
+            JOIN events e2 ON p.game_id = e2.game_id
+                AND e2.event_number = p.event_number + 1
+                AND e2.event_type IN (18, 19, 20, 22)
+            WHERE p.event_type = 7
+
+            UNION ALL
+
+            -- Possession starts after turnovers: new possessing team's first throw
+            SELECT
+                e2.game_id,
+                e2.event_number AS e1_num,
+                e2.team AS off_team,
+                CASE WHEN e2.team = g.away_team_id THEN TRUE ELSE FALSE END AS is_away
+            FROM events t
+            JOIN games g ON t.game_id = g.game_id
+            JOIN events e2 ON t.game_id = e2.game_id
+                AND e2.event_number = t.event_number + 1
+                AND e2.team != t.team
+                AND e2.event_type IN (18, 19, 20, 22)
+            WHERE t.event_type IN (20, 22, 11)
+        ),
+        seqs AS (
+            SELECT
+                ps.off_team,
+                CASE WHEN ps.is_away THEN -e1.thrower_x  ELSE e1.thrower_x  END AS t1_fx,
+                CASE WHEN ps.is_away THEN 120-e1.thrower_y ELSE e1.thrower_y END AS t1_fy,
+                CASE WHEN ps.is_away THEN -e1.receiver_x ELSE e1.receiver_x END AS t1_tx,
+                CASE WHEN ps.is_away THEN 120-e1.receiver_y ELSE e1.receiver_y END AS t1_ty,
+                CASE WHEN ps.is_away THEN -e2.thrower_x  ELSE e2.thrower_x  END AS t2_fx,
+                CASE WHEN ps.is_away THEN 120-e2.thrower_y ELSE e2.thrower_y END AS t2_fy,
+                CASE WHEN ps.is_away THEN -e2.receiver_x ELSE e2.receiver_x END AS t2_tx,
+                CASE WHEN ps.is_away THEN 120-e2.receiver_y ELSE e2.receiver_y END AS t2_ty,
+                CASE WHEN ps.is_away THEN -e3.thrower_x  ELSE e3.thrower_x  END AS t3_fx,
+                CASE WHEN ps.is_away THEN 120-e3.thrower_y ELSE e3.thrower_y END AS t3_fy,
+                CASE WHEN ps.is_away THEN -e3.receiver_x ELSE e3.receiver_x END AS t3_tx,
+                CASE WHEN ps.is_away THEN 120-e3.receiver_y ELSE e3.receiver_y END AS t3_ty
+            FROM poss_starts ps
+            JOIN events e1 ON ps.game_id = e1.game_id AND e1.event_number = ps.e1_num
+            JOIN events e2 ON ps.game_id = e2.game_id AND e2.event_number = ps.e1_num + 1
+            JOIN events e3 ON ps.game_id = e3.game_id AND e3.event_number = ps.e1_num + 2
+            WHERE e1.event_type IN (18, 19) AND e1.thrower_x IS NOT NULL AND e1.receiver_x IS NOT NULL
+              AND e2.event_type IN (18, 19) AND e2.receiver_x IS NOT NULL
+              AND e3.event_type IN (18, 19) AND e3.receiver_x IS NOT NULL
+              AND e1.team = e2.team AND e2.team = e3.team
+              {tf}
+        )
+        SELECT * FROM seqs
+    """, params)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No sequence data found")
+
+    SEQ_COLS = ['t1_fx','t1_fy','t1_tx','t1_ty','t2_fx','t2_fy','t2_tx','t2_ty','t3_fx','t3_fy','t3_tx','t3_ty']
+    X = np.array([[float(r[c]) for c in SEQ_COLS] for r in rows], dtype=np.float32)
+
+    # Playing field: x=-25..25, y=10..110 (exclude end zones for zone assignment)
+    x_edges = np.linspace(-25, 25, zone_cols + 1)
+    y_edges = np.linspace(10, 110, zone_rows + 1)
+
+    zones = []
+    for row_i in range(zone_rows):
+        for col_i in range(zone_cols):
+            x_lo, x_hi = float(x_edges[col_i]), float(x_edges[col_i + 1])
+            y_lo, y_hi = float(y_edges[row_i]), float(y_edges[row_i + 1])
+            mask = (
+                (X[:, 0] >= x_lo) & (X[:, 0] < x_hi) &
+                (X[:, 1] >= y_lo) & (X[:, 1] < y_hi)
+            )
+            count = int(mask.sum())
+            if count < 5:
+                zones.append({
+                    "zone_id": row_i * zone_cols + col_i,
+                    "col": col_i, "row": row_i,
+                    "x_range": [x_lo, x_hi], "y_range": [y_lo, y_hi],
+                    "count": 0, "throws": []
+                })
+                continue
+            center = X[mask].mean(axis=0)
+            throws = []
+            for t in range(3):
+                throws.append({
+                    "from_x": round(float(center[t*4+0]), 1),
+                    "from_y": round(float(center[t*4+1]), 1),
+                    "to_x":   round(float(center[t*4+2]), 1),
+                    "to_y":   round(float(center[t*4+3]), 1),
+                })
+            zones.append({
+                "zone_id": row_i * zone_cols + col_i,
+                "col": col_i, "row": row_i,
+                "x_range": [x_lo, x_hi], "y_range": [y_lo, y_hi],
+                "count": count, "throws": throws,
+            })
+
+    max_count = max((z["count"] for z in zones), default=1)
+    for z in zones:
+        z["relative_density"] = round(z["count"] / max_count, 3)
+
+    return {"zones": zones, "zone_cols": zone_cols, "zone_rows": zone_rows, "total": len(rows)}
+
+
+@app.get("/pull-play/hotspots")
+def get_pull_play_hotspots(
+    team: Optional[str] = Query(None, description="Receiving team (omit for all teams)"),
+    top_n: int = Query(20, ge=5, le=50),
+) -> Dict[str, Any]:
+    """
+    Return the most common pull landing positions (direction-normalized).
+    These are the hotspots where teams most frequently run startup plays.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    tf = "AND recv.team = %s" if team else ""
+    params: list = [team] if team else []
+    cur.execute(f"""
+        SELECT
+            CASE WHEN recv.team = g.away_team_id THEN -p.pull_x ELSE p.pull_x END AS norm_x,
+            CASE WHEN recv.team = g.away_team_id THEN 120 - p.pull_y ELSE p.pull_y END AS norm_y,
+            COUNT(*) AS cnt
+        FROM events p
+        JOIN games g ON p.game_id = g.game_id
+        JOIN events recv ON p.game_id = recv.game_id
+            AND recv.event_number = p.event_number + 1
+            AND recv.event_type IN (18, 19, 20, 22)
+        WHERE p.event_type = 7
+          AND p.pull_x IS NOT NULL AND p.pull_y IS NOT NULL
+          {tf}
+        GROUP BY norm_x, norm_y
+        ORDER BY cnt DESC
+        LIMIT %s
+    """, params + [top_n * 5])  # fetch more, then bin
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return {"hotspots": []}
+
+    # Bin nearby positions together (within 5 yards) using greedy merging
+    hotspots: list = []
+    for row in rows:
+        rx, ry, cnt = float(row['norm_x']), float(row['norm_y']), int(row['cnt'])
+        merged = False
+        for h in hotspots:
+            if (rx - h['x']) ** 2 + (ry - h['y']) ** 2 < 25:  # within 5 yards
+                # Weighted average position
+                total = h['count'] + cnt
+                h['x'] = (h['x'] * h['count'] + rx * cnt) / total
+                h['y'] = (h['y'] * h['count'] + ry * cnt) / total
+                h['count'] = total
+                merged = True
+                break
+        if not merged:
+            hotspots.append({'x': rx, 'y': ry, 'count': cnt})
+
+    hotspots.sort(key=lambda h: -h['count'])
+    hotspots = hotspots[:top_n]
+    max_count = hotspots[0]['count'] if hotspots else 1
+    for h in hotspots:
+        h['x'] = round(h['x'], 1)
+        h['y'] = round(h['y'], 1)
+        h['relative_freq'] = round(h['count'] / max_count, 3)
+
+    return {"hotspots": hotspots}
+
+
+@app.get("/pull-play/clusters")
+def get_pull_play_clusters(
+    pull_x: float = Query(0.0, description="Pull landing X (-25 to 25)"),
+    pull_y: float = Query(20.0, description="Pull landing Y (0 to 120)"),
+    team: Optional[str] = Query(None, description="Receiving team (omit for all teams)"),
+) -> Dict[str, Any]:
+    """
+    Cluster actual 3-throw sequences from near this pull landing (or for this team
+    league-wide when too few sequences exist near the position).
+    Uses HDBSCAN to automatically detect the natural number of play archetypes.
+    """
+    from sklearn.cluster import KMeans as _KMeans
+    from sklearn.metrics import silhouette_score as _silhouette_score
+    from sklearn.preprocessing import StandardScaler as _StandardScaler
+
+    SEQ_COLS = ['t1_fx','t1_fy','t1_tx','t1_ty',
+                't2_fx','t2_fy','t2_tx','t2_ty',
+                't3_fx','t3_fy','t3_tx','t3_ty']
+
+    def _query_sequences(radius: float, team_filter: Optional[str]) -> list:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        tf = "AND recv_team = %s" if team_filter else ""
+        params: list = [pull_x, pull_y, radius]
+        if team_filter:
+            params.append(team_filter)
+        cur.execute(f"""
+            WITH pull_data AS (
+                SELECT
+                    p.game_id, p.event_number AS pull_num,
+                    CASE WHEN recv.team = g.away_team_id THEN -p.pull_x ELSE p.pull_x END AS norm_pull_x,
+                    CASE WHEN recv.team = g.away_team_id THEN 120 - p.pull_y ELSE p.pull_y END AS norm_pull_y,
+                    recv.team AS recv_team,
+                    CASE WHEN recv.team = g.away_team_id THEN TRUE ELSE FALSE END AS is_away
+                FROM events p
+                JOIN games g ON p.game_id = g.game_id
+                JOIN events recv ON p.game_id = recv.game_id
+                    AND recv.event_number = p.event_number + 1
+                    AND recv.event_type IN (18, 19, 20, 22)
+                WHERE p.event_type = 7
+                  AND p.pull_x IS NOT NULL AND p.pull_y IS NOT NULL
+            ),
+            nearby AS (
+                SELECT * FROM pull_data
+                WHERE SQRT(POWER(norm_pull_x - %s, 2) + POWER(norm_pull_y - %s, 2)) <= %s
+                {tf}
+            ),
+            seqs AS (
+                SELECT
+                    CASE WHEN n.is_away THEN -e1.thrower_x  ELSE e1.thrower_x  END AS t1_fx,
+                    CASE WHEN n.is_away THEN 120-e1.thrower_y ELSE e1.thrower_y END AS t1_fy,
+                    CASE WHEN n.is_away THEN -e1.receiver_x ELSE e1.receiver_x END AS t1_tx,
+                    CASE WHEN n.is_away THEN 120-e1.receiver_y ELSE e1.receiver_y END AS t1_ty,
+                    CASE WHEN n.is_away THEN -e2.thrower_x  ELSE e2.thrower_x  END AS t2_fx,
+                    CASE WHEN n.is_away THEN 120-e2.thrower_y ELSE e2.thrower_y END AS t2_fy,
+                    CASE WHEN n.is_away THEN -e2.receiver_x ELSE e2.receiver_x END AS t2_tx,
+                    CASE WHEN n.is_away THEN 120-e2.receiver_y ELSE e2.receiver_y END AS t2_ty,
+                    CASE WHEN n.is_away THEN -e3.thrower_x  ELSE e3.thrower_x  END AS t3_fx,
+                    CASE WHEN n.is_away THEN 120-e3.thrower_y ELSE e3.thrower_y END AS t3_fy,
+                    CASE WHEN n.is_away THEN -e3.receiver_x ELSE e3.receiver_x END AS t3_tx,
+                    CASE WHEN n.is_away THEN 120-e3.receiver_y ELSE e3.receiver_y END AS t3_ty
+                FROM nearby n
+                JOIN events e1 ON n.game_id = e1.game_id AND e1.event_number = n.pull_num + 1
+                JOIN events e2 ON n.game_id = e2.game_id AND e2.event_number = n.pull_num + 2
+                JOIN events e3 ON n.game_id = e3.game_id AND e3.event_number = n.pull_num + 3
+                WHERE e1.event_type IN (18,19) AND e1.receiver_x IS NOT NULL
+                  AND e2.event_type IN (18,19) AND e2.receiver_x IS NOT NULL
+                  AND e3.event_type IN (18,19) AND e3.receiver_x IS NOT NULL
+                  AND e1.team = e2.team AND e2.team = e3.team
+            )
+            SELECT * FROM seqs
+        """, params)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+
+    # For team queries: first try a radius of 30; if < 50 sequences expand to whole field
+    # For all-teams: use radius 25 (position-specific)
+    if team:
+        rows = _query_sequences(30.0, team)
+        if len(rows) < 50:
+            rows = _query_sequences(200.0, team)  # whole field for this team
+    else:
+        rows = _query_sequences(25.0, None)
+
+    if len(rows) < 10:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Not enough sequences ({len(rows)}) to cluster. Try a different pull position."
+        )
+
+    X = np.array([[float(r[c]) for c in SEQ_COLS] for r in rows], dtype=np.float32)
+    total = len(rows)
+
+    # Normalize so x and y coords contribute equally (y range is 5x wider than x)
+    scaler = _StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # Try k=2..6, pick the k with the highest silhouette score.
+    # Use a subsample for silhouette scoring to keep it fast on large datasets.
+    max_k = min(6, total // 5)  # need at least 5 points per cluster
+    if max_k < 2:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Not enough sequences ({total}) to cluster. Try a different pull position."
+        )
+
+    rng = np.random.default_rng(42)
+    sample_idx = rng.choice(total, size=min(500, total), replace=False)
+    X_sample = X_scaled[sample_idx]
+
+    best_k, best_score, best_labels = 2, -1.0, None
+    for k in range(2, max_k + 1):
+        km = _KMeans(n_clusters=k, random_state=42, n_init=10)
+        lbls = km.fit_predict(X_scaled)
+        score = float(_silhouette_score(X_sample, lbls[sample_idx]))
+        if score > best_score:
+            best_k, best_score, best_labels = k, score, lbls
+
+    counts = np.bincount(best_labels, minlength=best_k)
+    order = np.argsort(-counts)
+
+    result_clusters = []
+    for rank, i in enumerate(order):
+        mask = best_labels == i
+        center = X[mask].mean(axis=0)  # original coords for output
+        throws = []
+        for t in range(3):
+            throws.append({
+                "from_x": round(float(center[t*4+0]), 1),
+                "from_y": round(float(center[t*4+1]), 1),
+                "to_x":   round(float(center[t*4+2]), 1),
+                "to_y":   round(float(center[t*4+3]), 1),
+            })
+        result_clusters.append({
+            "cluster_id": rank + 1,
+            "throws": throws,
+            "count": int(counts[i]),
+            "frequency": round(float(counts[i]) / total, 3),
+        })
+
+    return {"clusters": result_clusters, "n_clusters": best_k, "sample_size": total}
+
+
+def _epv_predict_batch(grid_points: np.ndarray, model_type: str) -> np.ndarray:
+    """Run EPV inference on a batch of feature rows."""
+    if model_type == "xgb":
+        return _epv_xgb.predict_proba(grid_points)[:, 1]
+    else:
+        scaled = _epv_scaler.transform(grid_points)
+        _epv_nn.eval()
+        with torch.no_grad():
+            return _epv_nn(torch.FloatTensor(scaled)).numpy()
+
+
+@app.get("/epv/heatmap")
+def get_epv_heatmap(
+    throw_idx: int = Query(1, ge=1, le=10, description="Throw number within possession (1-10)"),
+    team: Optional[str] = Query(None, description="Team name for team-specific EPV (omit for league average)"),
+    model: str = Query("xgb", description="Model to use: 'xgb' or 'nn'"),
+    quarter: Optional[int] = Query(None, ge=1, le=4, description="Game quarter 1-4 (omit for average over all quarters)"),
+) -> Dict[str, Any]:
+    """
+    Return EPV probability grid over the field.
+    Grid shape: 60 rows (y) × 25 cols (x), values in [0, 1].
+    """
+    if model == "xgb" and _epv_xgb is None:
+        raise HTTPException(status_code=503, detail="EPV XGBoost model not loaded. Run epv_model.ipynb first.")
+    if model == "nn" and _epv_nn is None:
+        raise HTTPException(status_code=503, detail="EPV Neural Net model not loaded. Run epv_model.ipynb first.")
+    if _epv_team_encoder is None:
+        raise HTTPException(status_code=503, detail="EPV team encoder not loaded.")
+
+    try:
+        xs = np.linspace(-25, 25, 25)
+        ys = np.linspace(0, 120, 60)
+        xx, yy = np.meshgrid(xs, ys)  # both (60, 25)
+        n_points = xx.size  # 1500
+
+        quarters_to_avg = [quarter] if quarter is not None else [1, 2, 3, 4]
+        teams_to_avg: list
+
+        if team is not None:
+            try:
+                team_id = int(_epv_team_encoder.transform([team])[0])
+            except (ValueError, KeyError):
+                raise HTTPException(status_code=400, detail=f"Unknown team: {team}")
+            teams_to_avg = [team_id]
+        else:
+            teams_to_avg = list(range(len(_epv_team_encoder.classes_)))
+
+        combos = len(quarters_to_avg) * len(teams_to_avg)
+        all_probs = np.zeros((combos, n_points), dtype=np.float32)
+        idx = 0
+        for q in quarters_to_avg:
+            for tid in teams_to_avg:
+                gp = np.column_stack([
+                    xx.ravel(), yy.ravel(),
+                    np.full(n_points, throw_idx),
+                    np.zeros(n_points),   # prev_throw_dx (neutral)
+                    np.zeros(n_points),   # prev_throw_dy (neutral)
+                    np.full(n_points, tid),
+                    np.full(n_points, q),
+                ]).astype(np.float32)
+                all_probs[idx] = _epv_predict_batch(gp, model)
+                idx += 1
+
+        grid = all_probs.mean(axis=0).reshape(60, 25)
+
+        return {
+            "grid": [[round(float(v), 4) for v in row] for row in grid],
+            "extent": [-25.0, 25.0, 0.0, 120.0],
+            "throw_idx": throw_idx,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Completion % Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/completion/throwers")
+def get_completion_throwers() -> List[str]:
+    """Return sorted list of thrower names known to the completion model."""
+    if _completion_thrower_encoder is None:
+        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_model.ipynb first.")
+    return sorted(_completion_thrower_encoder.classes_.tolist())
+
+
+@app.get("/completion/heatmap")
+def get_completion_heatmap(
+    thrower: str = Query(..., description="Thrower name"),
+    from_x: float = Query(..., description="Throw origin X (-25 to 25)"),
+    from_y: float = Query(..., description="Throw origin Y (0 to 120)"),
+) -> Dict[str, Any]:
+    """
+    Return completion probability grid for all target positions from a given origin.
+    Grid shape: 60 rows (y) × 25 cols (x), values in [0, 1].
+    """
+    if _completion_xgb is None or _completion_thrower_encoder is None:
+        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_model.ipynb first.")
+
+    try:
+        if thrower in _completion_thrower_encoder.classes_:
+            thrower_enc = int(_completion_thrower_encoder.transform([thrower])[0])
+        else:
+            thrower_enc = 0  # fallback to first encoded class
+
+        xs = np.linspace(-25, 25, 25)
+        ys = np.linspace(0, 120, 60)
+        xx, yy = np.meshgrid(xs, ys)  # (60, 25)
+
+        to_x = xx.ravel()
+        to_y = yy.ravel()
+        dy = to_y - from_y
+        dx = to_x - from_x
+        dist = np.sqrt(dx**2 + dy**2)
+        angle = np.arctan2(dy, dx)
+
+        grid_points = np.column_stack([
+            np.full(xx.size, from_x),
+            np.full(xx.size, from_y),
+            to_x, to_y,
+            dist, dy, dx, angle,
+            np.full(xx.size, thrower_enc),
+        ]).astype(np.float32)
+
+        probs = _completion_xgb.predict_proba(grid_points)[:, 1]
+        grid = probs.reshape(60, 25)
+
+        return {
+            "grid": [[round(float(v), 4) for v in row] for row in grid],
+            "extent": [-25.0, 25.0, 0.0, 120.0],
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/completion/predict")
+def get_completion_predict(
+    thrower: str = Query(..., description="Thrower name"),
+    from_x: float = Query(..., description="Throw origin X (-25 to 25)"),
+    from_y: float = Query(..., description="Throw origin Y (0 to 120)"),
+    to_x: float = Query(..., description="Throw target X (-25 to 25)"),
+    to_y: float = Query(..., description="Throw target Y (0 to 120)"),
+) -> Dict[str, Any]:
+    """Return completion probability for a single from→to throw by a specific thrower."""
+    if _completion_xgb is None or _completion_thrower_encoder is None:
+        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_model.ipynb first.")
+
+    try:
+        if thrower in _completion_thrower_encoder.classes_:
+            thrower_enc = int(_completion_thrower_encoder.transform([thrower])[0])
+        else:
+            thrower_enc = 0
+
+        dy = to_y - from_y
+        dx = to_x - from_x
+        dist = float(np.sqrt(dx**2 + dy**2))
+        angle = float(np.arctan2(dy, dx))
+
+        row = np.array([[from_x, from_y, to_x, to_y, dist, dy, dx, angle, thrower_enc]], dtype=np.float32)
+        prob = float(_completion_xgb.predict_proba(row)[0, 1])
+
+        return {"probability": round(prob, 4), "thrower": thrower}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

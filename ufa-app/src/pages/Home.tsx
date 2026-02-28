@@ -136,6 +136,51 @@ function Home() {
         >
           Pull Plays
         </button>
+        <button
+          onClick={() => navigate('/epv')}
+          style={{
+            padding: '10px 20px',
+            fontSize: '15px',
+            backgroundColor: '#f97316',
+            color: 'white',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            marginLeft: '10px',
+          }}
+        >
+          EPV Heatmap
+        </button>
+        <button
+          onClick={() => navigate('/zone-strategy')}
+          style={{
+            padding: '10px 20px',
+            fontSize: '15px',
+            backgroundColor: '#ec4899',
+            color: 'white',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            marginLeft: '10px',
+          }}
+        >
+          Zone Strategy Map
+        </button>
+        <button
+          onClick={() => navigate('/completion')}
+          style={{
+            padding: '10px 20px',
+            fontSize: '15px',
+            backgroundColor: '#22c55e',
+            color: 'white',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            marginLeft: '10px',
+          }}
+        >
+          Completion %
+        </button>
       </div>
 
       {stats && (

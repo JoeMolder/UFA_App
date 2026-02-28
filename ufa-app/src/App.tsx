@@ -6,6 +6,9 @@ import Prediction from './pages/Prediction'
 import Embeddings from './pages/Embeddings'
 import Turnovers from './pages/Turnovers'
 import PullPlays from './pages/PullPlays'
+import EPV from './pages/EPV'
+import ZoneStrategy from './pages/ZoneStrategy'
+import CompletionPredictor from './pages/CompletionPredictor'
 
 function App() {
   return (
@@ -17,6 +20,9 @@ function App() {
         <Route path="/embeddings" element={<Embeddings />} />
         <Route path="/turnovers" element={<Turnovers />} />
         <Route path="/pull-plays" element={<PullPlays />} />
+        <Route path="/epv" element={<EPV />} />
+        <Route path="/zone-strategy" element={<ZoneStrategy />} />
+        <Route path="/completion" element={<CompletionPredictor />} />
       </Routes>
     </Router>
   )
