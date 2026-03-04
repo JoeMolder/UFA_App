@@ -9,6 +9,8 @@ import PullPlays from './pages/PullPlays'
 import EPV from './pages/EPV'
 import ZoneStrategy from './pages/ZoneStrategy'
 import CompletionPredictor from './pages/CompletionPredictor'
+import LineSynergy from './pages/LineSynergy'
+import TeamPage from './pages/TeamPage'
 
 function App() {
   return (
@@ -23,6 +25,8 @@ function App() {
         <Route path="/epv" element={<EPV />} />
         <Route path="/zone-strategy" element={<ZoneStrategy />} />
         <Route path="/completion" element={<CompletionPredictor />} />
+        <Route path="/line-synergy" element={<LineSynergy />} />
+        <Route path="/team/:teamId" element={<TeamPage />} />
       </Routes>
     </Router>
   )

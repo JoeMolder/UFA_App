@@ -384,6 +384,28 @@ try:
 except Exception as e:
     print(f"Warning: Could not load completion XGBoost model: {e}")
 
+# Load lineup XGBoost model (P(score) for a 7-player O-lineup)
+LINEUP_XGB_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "lineup_xgb.pkl"
+
+_lineup_xgb = None
+_lineup_player_stats: Dict[str, Dict[str, float]] = {}
+_lineup_stat_cols: List[str] = []
+_lineup_feature_names: List[str] = []
+_lineup_league_avg: Dict[str, float] = {}
+_lineup_pair_familiarity: Dict[tuple, int] = {}
+
+try:
+    lineup_xgb_save = joblib.load(LINEUP_XGB_PATH)
+    _lineup_xgb = lineup_xgb_save["model"]
+    _lineup_player_stats = lineup_xgb_save["player_stats"]
+    _lineup_stat_cols = lineup_xgb_save["stat_cols"]
+    _lineup_feature_names = lineup_xgb_save["feature_names"]
+    _lineup_league_avg = lineup_xgb_save["league_avg"]
+    _lineup_pair_familiarity = lineup_xgb_save.get("pair_familiarity", {})
+    print(f"Lineup model loaded (AUC={lineup_xgb_save['metrics']['auc']:.4f}, {len(_lineup_player_stats)} players, {len(_lineup_pair_familiarity)} pairs)")
+except Exception as e:
+    print(f"Warning: Could not load lineup model: {e}")
+
 # ---------------------------------------------------------------------------
 # Player Stats, UMAP, and Clustering (stats-based)
 # ---------------------------------------------------------------------------
@@ -717,6 +739,243 @@ def get_teams() -> List[str]:
     cur.close()
     conn.close()
     return teams
+
+
+@app.get("/debug/player-possessions")
+def debug_player_possessions(player_id: str, team: str):
+    """Debug: count O-line possessions per year for a player on a team."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT e.year,
+               COUNT(DISTINCT lp.event_id) AS distinct_event_ids,
+               COUNT(*)                   AS raw_rows
+        FROM line_players lp
+        JOIN events e ON e.event_id = lp.event_id
+        WHERE lp.player_id = %s
+          AND lp.line_type = 'O'
+          AND e.team = %s
+          AND e.event_type = 2
+        GROUP BY e.year
+        ORDER BY e.year
+    """, (player_id, team))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"year": r['year'], "distinct_event_ids": r['distinct_event_ids'], "raw_rows": r['raw_rows']} for r in rows]
+
+
+@app.get("/team/{team_id}")
+def get_team(team_id: str, year: Optional[int] = None):
+    """Team overview: record, O-line rate, top players by hold rate, top 5 pair synergies."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # Team info
+    cur.execute("SELECT team_id, team_name, division FROM teams WHERE team_id = %s", (team_id,))
+    team_row = cur.fetchone()
+    if not team_row:
+        raise HTTPException(status_code=404, detail=f"Team '{team_id}' not found")
+
+    # Available seasons for this team
+    cur.execute("""
+        SELECT ARRAY_AGG(DISTINCT e.year ORDER BY e.year) AS years
+        FROM events e WHERE e.team = %s AND e.year IS NOT NULL
+    """, (team_id,))
+    years_row = cur.fetchone()
+    available_years = years_row['years'] or []
+
+    year_filter = "AND e.year = %s" if year else ""
+    year_params_1 = (team_id, year) if year else (team_id,)
+
+    # Win/loss record
+    year_game_filter = "AND year = %s" if year else ""
+    record_params = (team_id, team_id, team_id, team_id, team_id, team_id)
+    if year:
+        cur.execute(f"""
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE (home_team_id = %s AND home_score > away_score)
+                       OR (away_team_id = %s AND away_score > home_score)
+                ) AS wins,
+                COUNT(*) FILTER (
+                    WHERE (home_team_id = %s AND home_score < away_score)
+                       OR (away_team_id = %s AND away_score < home_score)
+                ) AS losses,
+                COUNT(*) AS total_games
+            FROM games
+            WHERE (home_team_id = %s OR away_team_id = %s)
+              AND home_score IS NOT NULL AND away_score IS NOT NULL
+              {year_game_filter}
+        """, record_params + ((year,) if year else ()))
+    else:
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE (home_team_id = %s AND home_score > away_score)
+                       OR (away_team_id = %s AND away_score > home_score)
+                ) AS wins,
+                COUNT(*) FILTER (
+                    WHERE (home_team_id = %s AND home_score < away_score)
+                       OR (away_team_id = %s AND away_score < home_score)
+                ) AS losses,
+                COUNT(*) AS total_games
+            FROM games
+            WHERE (home_team_id = %s OR away_team_id = %s)
+              AND home_score IS NOT NULL AND away_score IS NOT NULL
+        """, record_params)
+    record = cur.fetchone()
+
+    # O-line scoring rate (direct from team possessions, no player threshold)
+    cur.execute(f"""
+        WITH o_starts AS (
+            SELECT e.event_id, e.game_id, e.event_number, e.team
+            FROM events e WHERE e.event_type = 2 AND e.team = %s {year_filter}
+        ),
+        outcomes AS (
+            SELECT os.event_id,
+                COALESCE(BOOL_OR(e2.event_type = 19 AND e2.team = os.team), FALSE) AS scored
+            FROM o_starts os
+            LEFT JOIN events e2 ON e2.game_id = os.game_id
+                AND e2.event_number > os.event_number
+                AND e2.event_number < COALESCE(
+                    (SELECT MIN(e3.event_number) FROM events e3
+                     WHERE e3.game_id = os.game_id AND e3.event_type = 1
+                       AND e3.event_number > os.event_number), 9999999
+                )
+            GROUP BY os.event_id
+        )
+        SELECT ROUND(AVG(CASE WHEN scored THEN 1.0 ELSE 0.0 END)::numeric, 4) AS hold_rate
+        FROM outcomes
+    """, year_params_1)
+    o_line_rate = float(cur.fetchone()['hold_rate'] or 0)
+
+    # Top players by hold rate
+    cur.execute(f"""
+        WITH o_starts AS (
+            SELECT e.event_id, e.game_id, e.event_number, e.team
+            FROM events e WHERE e.event_type = 2 AND e.team = %s {year_filter}
+        ),
+        outcomes AS (
+            SELECT os.event_id,
+                COALESCE(BOOL_OR(e2.event_type = 19 AND e2.team = os.team), FALSE) AS scored
+            FROM o_starts os
+            LEFT JOIN events e2 ON e2.game_id = os.game_id
+                AND e2.event_number > os.event_number
+                AND e2.event_number < COALESCE(
+                    (SELECT MIN(e3.event_number) FROM events e3
+                     WHERE e3.game_id = os.game_id AND e3.event_type = 1
+                       AND e3.event_number > os.event_number), 9999999
+                )
+            GROUP BY os.event_id
+        )
+        SELECT
+            lp.player_id,
+            p.full_name,
+            COUNT(*) AS possessions,
+            ROUND(AVG(CASE WHEN oc.scored THEN 1.0 ELSE 0.0 END)::numeric, 4) AS hold_rate
+        FROM line_players lp
+        JOIN outcomes oc ON oc.event_id = lp.event_id
+        JOIN players p ON p.player_id = lp.player_id
+        WHERE lp.line_type = 'O'
+        GROUP BY lp.player_id, p.full_name
+        HAVING COUNT(*) >= GREATEST(5, (SELECT COUNT(*) * 0.20 FROM o_starts)::int)
+        ORDER BY hold_rate DESC
+    """, year_params_1)
+    player_rows = cur.fetchall()
+    top_players = [
+        {"id": r['player_id'], "name": r['full_name'],
+         "hold_rate": float(r['hold_rate']), "possessions": r['possessions']}
+        for r in player_rows[:5]
+    ]
+
+    # Top 5 pair synergies for this team
+    cur.execute(f"""
+        WITH o_starts AS (
+            SELECT e.event_id, e.game_id, e.event_number, e.team
+            FROM events e WHERE e.event_type = 2 AND e.team = %s {year_filter}
+        ),
+        outcomes AS (
+            SELECT os.event_id,
+                COALESCE(BOOL_OR(e2.event_type = 19 AND e2.team = os.team), FALSE) AS scored
+            FROM o_starts os
+            LEFT JOIN events e2 ON e2.game_id = os.game_id
+                AND e2.event_number > os.event_number
+                AND e2.event_number < COALESCE(
+                    (SELECT MIN(e3.event_number) FROM events e3
+                     WHERE e3.game_id = os.game_id AND e3.event_type = 1
+                       AND e3.event_number > os.event_number), 9999999
+                )
+            GROUP BY os.event_id
+        ),
+        player_rates AS (
+            SELECT lp.player_id,
+                AVG(CASE WHEN oc.scored THEN 1.0 ELSE 0.0 END) AS hold_rate
+            FROM line_players lp
+            JOIN outcomes oc ON oc.event_id = lp.event_id
+            WHERE lp.line_type = 'O'
+            GROUP BY lp.player_id
+            HAVING COUNT(*) >= GREATEST(5, (SELECT COUNT(*) * 0.20 FROM o_starts)::int)
+        ),
+        pair_stats AS (
+            SELECT lp1.player_id AS p1, lp2.player_id AS p2,
+                COUNT(*) AS shared_poss,
+                AVG(CASE WHEN oc.scored THEN 1.0 ELSE 0.0 END) AS combined_rate
+            FROM line_players lp1
+            JOIN line_players lp2 ON lp1.event_id = lp2.event_id
+                AND lp1.line_type = 'O' AND lp2.line_type = 'O'
+                AND lp1.player_id < lp2.player_id
+            JOIN outcomes oc ON oc.event_id = lp1.event_id
+            GROUP BY lp1.player_id, lp2.player_id
+            HAVING COUNT(*) >= GREATEST(5, (SELECT COUNT(*) * 0.10 FROM o_starts)::int)
+        )
+        SELECT
+            ps.p1, ps.p2,
+            p1n.full_name AS p1_name, p2n.full_name AS p2_name,
+            ps.shared_poss,
+            ROUND(ps.combined_rate::numeric, 4) AS combined_rate,
+            ROUND(pr1.hold_rate::numeric, 4) AS p1_rate,
+            ROUND(pr2.hold_rate::numeric, 4) AS p2_rate,
+            ROUND((ps.combined_rate - (pr1.hold_rate + pr2.hold_rate) / 2)::numeric, 4) AS synergy_delta
+        FROM pair_stats ps
+        JOIN player_rates pr1 ON pr1.player_id = ps.p1
+        JOIN player_rates pr2 ON pr2.player_id = ps.p2
+        JOIN players p1n ON p1n.player_id = ps.p1
+        JOIN players p2n ON p2n.player_id = ps.p2
+        ORDER BY synergy_delta DESC
+        LIMIT 5
+    """, year_params_1)
+    synergy_rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return {
+        "team_id":        team_row['team_id'],
+        "team_name":      team_row['team_name'],
+        "division":       team_row['division'],
+        "available_years": available_years,
+        "selected_year":  year,
+        "record": {
+            "wins":   record['wins'],
+            "losses": record['losses'],
+            "games":  record['total_games'],
+        },
+        "o_line_rate": round(o_line_rate, 4),
+        "top_players": top_players,
+        "top_synergies": [
+            {
+                "player1": {"id": r['p1'], "name": r['p1_name']},
+                "player2": {"id": r['p2'], "name": r['p2_name']},
+                "shared_possessions": r['shared_poss'],
+                "combined_rate":      float(r['combined_rate']),
+                "p1_rate":            float(r['p1_rate']),
+                "p2_rate":            float(r['p2_rate']),
+                "synergy_delta":      float(r['synergy_delta']),
+            }
+            for r in synergy_rows
+        ],
+    }
 
 
 @app.get("/embeddings/players")
@@ -1924,6 +2183,212 @@ def get_completion_predict(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Line Synergy Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/synergy/players")
+def get_synergy_players():
+    """All players who appear on O-lines, with full names."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT DISTINCT lp.player_id, COALESCE(p.full_name, lp.player_id) as full_name
+        FROM line_players lp
+        LEFT JOIN players p ON p.player_id = lp.player_id
+        WHERE lp.line_type = 'O'
+        ORDER BY full_name
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"id": r["player_id"], "name": r["full_name"]} for r in rows]
+
+
+def _scoring_rate_for_player(cur, player_id: str) -> float:
+    """Compute O-line scoring rate for a single player."""
+    cur.execute("""
+        WITH p_o_starts AS (
+            SELECT lp.event_id, e.game_id, e.event_number, e.team
+            FROM line_players lp
+            JOIN events e ON e.event_id = lp.event_id
+            WHERE lp.player_id = %(pid)s AND lp.line_type = 'O'
+        ),
+        outcomes AS (
+            SELECT os.event_id,
+                COALESCE(BOOL_OR(e2.event_type = 19 AND e2.team = os.team), FALSE) AS scored
+            FROM p_o_starts os
+            LEFT JOIN events e2 ON e2.game_id = os.game_id
+                AND e2.event_number > os.event_number
+                AND e2.event_number < COALESCE(
+                    (SELECT MIN(e3.event_number) FROM events e3
+                     WHERE e3.game_id = os.game_id AND e3.event_type = 1
+                       AND e3.event_number > os.event_number),
+                    9999999
+                )
+            GROUP BY os.event_id
+        )
+        SELECT ROUND(AVG(CASE WHEN scored THEN 1.0 ELSE 0.0 END)::numeric, 4) as scoring_rate
+        FROM outcomes
+    """, {"pid": player_id})
+    row = cur.fetchone()
+    return float(row["scoring_rate"] or 0)
+
+
+@app.get("/synergy/pair")
+def get_synergy_pair(player1: str = Query(...), player2: str = Query(...)):
+    """Compute synergy metrics between two players on O-lines."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # Validate both players exist
+    cur.execute("""
+        SELECT COUNT(DISTINCT player_id) as cnt FROM line_players
+        WHERE player_id IN (%(p1)s, %(p2)s) AND line_type = 'O'
+    """, {"p1": player1, "p2": player2})
+    if cur.fetchone()["cnt"] < 2:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="One or both players not found in O-line data")
+
+    # Shared possessions + combined scoring rate
+    cur.execute("""
+        WITH shared_o_starts AS (
+            SELECT lp1.event_id, e.game_id, e.event_number, e.team
+            FROM line_players lp1
+            JOIN line_players lp2 ON lp2.event_id = lp1.event_id
+                AND lp2.player_id = %(p2)s AND lp2.line_type = 'O'
+            JOIN events e ON e.event_id = lp1.event_id
+            WHERE lp1.player_id = %(p1)s AND lp1.line_type = 'O'
+        ),
+        outcomes AS (
+            SELECT os.event_id,
+                COALESCE(BOOL_OR(e2.event_type = 19 AND e2.team = os.team), FALSE) AS scored
+            FROM shared_o_starts os
+            LEFT JOIN events e2 ON e2.game_id = os.game_id
+                AND e2.event_number > os.event_number
+                AND e2.event_number < COALESCE(
+                    (SELECT MIN(e3.event_number) FROM events e3
+                     WHERE e3.game_id = os.game_id AND e3.event_type = 1
+                       AND e3.event_number > os.event_number),
+                    9999999
+                )
+            GROUP BY os.event_id
+        )
+        SELECT COUNT(*) as shared_possessions,
+               ROUND(AVG(CASE WHEN scored THEN 1.0 ELSE 0.0 END)::numeric, 4) as combined_scoring_rate
+        FROM outcomes
+    """, {"p1": player1, "p2": player2})
+    shared_row = cur.fetchone()
+    shared_possessions = int(shared_row["shared_possessions"])
+    combined_scoring_rate = float(shared_row["combined_scoring_rate"] or 0)
+
+    p1_rate = _scoring_rate_for_player(cur, player1)
+    p2_rate = _scoring_rate_for_player(cur, player2)
+    synergy_delta = round(combined_scoring_rate - (p1_rate + p2_rate) / 2, 4)
+
+    # Throw exchange
+    cur.execute("""
+        SELECT
+            SUM(CASE WHEN thrower = %(p1)s AND receiver = %(p2)s THEN 1 ELSE 0 END) as p1_to_p2_total,
+            SUM(CASE WHEN thrower = %(p1)s AND receiver = %(p2)s AND event_type IN (18,19) THEN 1 ELSE 0 END) as p1_to_p2_comp,
+            SUM(CASE WHEN thrower = %(p2)s AND receiver = %(p1)s THEN 1 ELSE 0 END) as p2_to_p1_total,
+            SUM(CASE WHEN thrower = %(p2)s AND receiver = %(p1)s AND event_type IN (18,19) THEN 1 ELSE 0 END) as p2_to_p1_comp
+        FROM events
+        WHERE event_type IN (18, 19, 20, 22)
+          AND ((thrower = %(p1)s AND receiver = %(p2)s) OR (thrower = %(p2)s AND receiver = %(p1)s))
+    """, {"p1": player1, "p2": player2})
+    t = cur.fetchone()
+
+    def safe_pct(comp, total):
+        return round(comp / total, 4) if total > 0 else 0.0
+
+    p1_to_p2_total = int(t["p1_to_p2_total"] or 0)
+    p2_to_p1_total = int(t["p2_to_p1_total"] or 0)
+
+    # Player names
+    cur.execute("SELECT player_id, full_name FROM players WHERE player_id IN (%(p1)s, %(p2)s)",
+                {"p1": player1, "p2": player2})
+    names = {r["player_id"]: r["full_name"] for r in cur.fetchall()}
+    cur.close()
+    conn.close()
+
+    return {
+        "player1": {"id": player1, "name": names.get(player1, player1)},
+        "player2": {"id": player2, "name": names.get(player2, player2)},
+        "shared_possessions": shared_possessions,
+        "combined_scoring_rate": combined_scoring_rate,
+        "p1_scoring_rate": p1_rate,
+        "p2_scoring_rate": p2_rate,
+        "synergy_delta": synergy_delta,
+        "p1_to_p2": {"count": p1_to_p2_total, "completion_pct": safe_pct(int(t["p1_to_p2_comp"] or 0), p1_to_p2_total)},
+        "p2_to_p1": {"count": p2_to_p1_total, "completion_pct": safe_pct(int(t["p2_to_p1_comp"] or 0), p2_to_p1_total)},
+    }
+
+
+@app.get("/lineup/predict")
+def predict_lineup(
+    p1: str = Query(...), p2: str = Query(...), p3: str = Query(...),
+    p4: str = Query(...), p5: str = Query(...), p6: str = Query(...),
+    p7: str = Query(...),
+):
+    """Predict P(score) for a 7-player O-lineup."""
+    if _lineup_xgb is None:
+        raise HTTPException(status_code=503, detail="Lineup model not loaded")
+
+    lineup = [p1, p2, p3, p4, p5, p6, p7]
+    o_stats = [
+        [_lineup_player_stats[pid][col] for col in _lineup_stat_cols]
+        for pid in lineup if pid in _lineup_player_stats
+    ]
+
+    if not o_stats:
+        raise HTTPException(status_code=400, detail="None of the players have stats data")
+
+    o_arr = np.array(o_stats)
+    # D-line unknown at inference time — use league averages (same as training fallback)
+    d_arr = np.array([[_lineup_league_avg[col] for col in _lineup_stat_cols]])
+
+    feats: List[float] = []
+    for arr in [o_arr, d_arr]:
+        for col_vals in arr.T:
+            feats += [float(col_vals.mean()), float(col_vals.max()), float(col_vals.min()), float(col_vals.std())]
+
+    feats.append(float(np.sum(o_arr[:, _lineup_stat_cols.index('completion_pct')] > _lineup_league_avg['completion_pct'])))
+    feats.append(float(np.sum(o_arr[:, _lineup_stat_cols.index('huck_rate')] > _lineup_league_avg['huck_rate'])))
+    feats.append(float(len(o_stats)))
+    feats.append(0.0)   # n_d_players_with_stats = 0 (league avg used)
+
+    # Pairwise line familiarity (21 pairs in a 7-player lineup)
+    from itertools import combinations
+    pair_counts = []
+    for pid1, pid2 in combinations(sorted(lineup), 2):
+        key = (pid1, pid2) if pid1 < pid2 else (pid2, pid1)
+        pair_counts.append(_lineup_pair_familiarity.get(key, 0))
+    feats += [
+        float(np.mean(pair_counts)) if pair_counts else 0.0,
+        float(np.min(pair_counts)) if pair_counts else 0.0,
+        float(np.max(pair_counts)) if pair_counts else 0.0,
+        float(sum(1 for c in pair_counts if c > 0)),
+    ]
+
+    feats += [0.0, 0.0, 0.0]  # score_diff, total_score, quarter (unknown at inference)
+
+    prob = float(_lineup_xgb.predict_proba(np.array([feats], dtype=np.float32))[0, 1])
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT player_id, full_name FROM players WHERE player_id = ANY(%s)", (lineup,))
+    names = {r["player_id"]: r["full_name"] for r in cur.fetchall()}
+    cur.close()
+    conn.close()
+
+    return {
+        "probability": round(prob, 4),
+        "players": [{"id": pid, "name": names.get(pid, pid)} for pid in lineup],
+        "known_players": len(o_stats),
+    }
 
 
 if __name__ == "__main__":

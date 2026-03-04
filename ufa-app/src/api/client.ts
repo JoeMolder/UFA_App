@@ -178,6 +178,63 @@ export interface CompletionHeatmapResponse {
   extent: [number, number, number, number];
 }
 
+export interface PlayerOption {
+  id: string;
+  name: string;
+}
+
+export interface ThrowExchange {
+  count: number;
+  completion_pct: number;
+}
+
+export interface SynergyPairResponse {
+  player1: PlayerOption;
+  player2: PlayerOption;
+  shared_possessions: number;
+  combined_scoring_rate: number;
+  p1_scoring_rate: number;
+  p2_scoring_rate: number;
+  synergy_delta: number;
+  p1_to_p2: ThrowExchange;
+  p2_to_p1: ThrowExchange;
+}
+
+export interface LineupPredictResponse {
+  probability: number;
+  players: PlayerOption[];
+  known_players: number;
+}
+
+export interface TeamSynergyPair {
+  player1: { id: string; name: string };
+  player2: { id: string; name: string };
+  shared_possessions: number;
+  combined_rate: number;
+  p1_rate: number;
+  p2_rate: number;
+  synergy_delta: number;
+}
+
+export interface TeamPlayer {
+  id: string;
+  name: string;
+  hold_rate: number;
+  possessions: number;
+}
+
+export interface TeamResponse {
+  team_id: string;
+  team_name: string;
+  division: string;
+  available_years: number[];
+  selected_year: number | null;
+  record: { wins: number; losses: number; games: number };
+  o_line_rate: number;
+  top_players: TeamPlayer[];
+  top_synergies: TeamSynergyPair[];
+}
+
 export interface CompletionPredictResponse {
   probability: number;
   thrower: string;
@@ -432,6 +489,37 @@ export const api = {
     const response = await apiClient.get<BatchPredictionResponse>('/predict/throws/batch', {
       params: { player, grid_cells_x: gridCellsX, grid_cells_y: gridCellsY, heatmap_resolution: heatmapResolution },
     });
+    return response.data;
+  },
+
+  // Line synergy: all players on O-lines
+  getSynergyPlayers: async (): Promise<PlayerOption[]> => {
+    const response = await apiClient.get<PlayerOption[]>('/synergy/players');
+    return response.data;
+  },
+
+  // Line synergy: pair metrics
+  getSynergyPair: async (player1: string, player2: string): Promise<SynergyPairResponse> => {
+    const response = await apiClient.get<SynergyPairResponse>('/synergy/pair', {
+      params: { player1, player2 },
+    });
+    return response.data;
+  },
+
+  // Lineup scoring predictor
+  getLineupPredict: async (players: string[]): Promise<LineupPredictResponse> => {
+    const [p1, p2, p3, p4, p5, p6, p7] = players;
+    const response = await apiClient.get<LineupPredictResponse>('/lineup/predict', {
+      params: { p1, p2, p3, p4, p5, p6, p7 },
+    });
+    return response.data;
+  },
+
+  // Get team page data
+  getTeam: async (teamId: string, year?: number): Promise<TeamResponse> => {
+    const params: Record<string, number> = {};
+    if (year) params.year = year;
+    const response = await apiClient.get<TeamResponse>(`/team/${teamId}`, { params });
     return response.data;
   },
 };

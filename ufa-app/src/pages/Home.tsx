@@ -76,111 +76,38 @@ function Home() {
         <p>Ultimate Frisbee Association Data Analysis</p>
       </header>
 
-      <div style={{ marginBottom: '20px' }}>
-        <button
-          onClick={() => navigate('/predict')}
-          style={{
-            padding: '10px 20px',
-            fontSize: '15px',
-            backgroundColor: '#0ea5e9',
-            color: 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: 'pointer',
-          }}
-        >
-          Throw Prediction Heatmap
-        </button>
-        <button
-          onClick={() => navigate('/embeddings')}
-          style={{
-            padding: '10px 20px',
-            fontSize: '15px',
-            backgroundColor: '#8b5cf6',
-            color: 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            marginLeft: '10px',
-          }}
-        >
-          Player Embeddings
-        </button>
-        <button
-          onClick={() => navigate('/turnovers')}
-          style={{
-            padding: '10px 20px',
-            fontSize: '15px',
-            backgroundColor: '#ef4444',
-            color: 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            marginLeft: '10px',
-          }}
-        >
-          Turnover Heatmap
-        </button>
-        <button
-          onClick={() => navigate('/pull-plays')}
-          style={{
-            padding: '10px 20px',
-            fontSize: '15px',
-            backgroundColor: '#14b8a6',
-            color: 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            marginLeft: '10px',
-          }}
-        >
-          Pull Plays
-        </button>
-        <button
-          onClick={() => navigate('/epv')}
-          style={{
-            padding: '10px 20px',
-            fontSize: '15px',
-            backgroundColor: '#f97316',
-            color: 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            marginLeft: '10px',
-          }}
-        >
-          EPV Heatmap
-        </button>
-        <button
-          onClick={() => navigate('/zone-strategy')}
-          style={{
-            padding: '10px 20px',
-            fontSize: '15px',
-            backgroundColor: '#ec4899',
-            color: 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            marginLeft: '10px',
-          }}
-        >
-          Zone Strategy Map
-        </button>
-        <button
-          onClick={() => navigate('/completion')}
-          style={{
-            padding: '10px 20px',
-            fontSize: '15px',
-            backgroundColor: '#22c55e',
-            color: 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            marginLeft: '10px',
-          }}
-        >
-          Completion %
-        </button>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(4, 1fr)',
+        gap: '10px',
+        marginBottom: '20px',
+      }}>
+        {[
+          { label: 'Throw Prediction Heatmap', path: '/predict',       color: '#0ea5e9' },
+          { label: 'Player Embeddings',         path: '/embeddings',    color: '#8b5cf6' },
+          { label: 'Turnover Heatmap',          path: '/turnovers',     color: '#ef4444' },
+          { label: 'Pull Plays',                path: '/pull-plays',    color: '#14b8a6' },
+          { label: 'EPV Heatmap',               path: '/epv',           color: '#f97316' },
+          { label: 'Zone Strategy Map',         path: '/zone-strategy', color: '#ec4899' },
+          { label: 'Completion %',              path: '/completion',    color: '#22c55e' },
+          { label: 'Line Synergy',              path: '/line-synergy',  color: '#6366f1' },
+        ].map(({ label, path, color }) => (
+          <button
+            key={path}
+            onClick={() => navigate(path)}
+            style={{
+              padding: '10px 20px',
+              fontSize: '15px',
+              backgroundColor: color,
+              color: 'white',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+            }}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {stats && (
@@ -233,12 +160,20 @@ function Home() {
               <div className="game-date">{game.game_date}</div>
               <div className="game-matchup">
                 <div className="team">
-                  <span className="team-name">{game.away_team_id}</span>
+                  <span
+                    className="team-name"
+                    onClick={(e) => { e.stopPropagation(); navigate(`/team/${game.away_team_id}`); }}
+                    style={{ cursor: 'pointer', textDecoration: 'underline' }}
+                  >{game.away_team_id}</span>
                   <span className="score">{game.away_score}</span>
                 </div>
                 <span className="vs">@</span>
                 <div className="team">
-                  <span className="team-name">{game.home_team_id}</span>
+                  <span
+                    className="team-name"
+                    onClick={(e) => { e.stopPropagation(); navigate(`/team/${game.home_team_id}`); }}
+                    style={{ cursor: 'pointer', textDecoration: 'underline' }}
+                  >{game.home_team_id}</span>
                   <span className="score">{game.home_score}</span>
                 </div>
               </div>
