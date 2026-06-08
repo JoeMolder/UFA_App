@@ -128,9 +128,6 @@ function EPVHeatmap() {
     // Draw each grid cell as a rectangle on the canvas
     // grid[row][col]: row=0 is y=0 (own endzone), row=59 is y=120 (scoring end)
     //                 col=0 is x=-25 (left sideline), col=24 is x=25 (right sideline)
-    const cellW = fieldWidth / nRows   // each y-step maps to canvas X
-    const cellH = fieldHeight / nCols  // each x-step maps to canvas Y
-
     const imageData = ctx.createImageData(CANVAS_WIDTH, CANVAS_HEIGHT)
 
     for (let row = 0; row < nRows; row++) {

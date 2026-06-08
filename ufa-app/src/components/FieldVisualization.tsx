@@ -27,7 +27,6 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
   // Field dimensions based on actual data coordinate system
   const FIELD_X_MIN = -27
   const FIELD_X_MAX = 27
-  const FIELD_Y_MIN = 0
   const FIELD_Y_MAX = 120 // Includes endzones
   const ENDZONE_Y = 20 // Endzone depth
 
