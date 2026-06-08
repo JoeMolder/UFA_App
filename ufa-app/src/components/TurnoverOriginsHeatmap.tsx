@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { api, TurnoverOriginsResponse } from '../api/client'
+import { api, TurnoverOriginsResponse, PlayerOption } from '../api/client'
 
 // Green → Yellow → Red colormap for turnover rate
 function rateColor(t: number): [number, number, number, number] {
@@ -30,7 +30,7 @@ function TurnoverOriginsHeatmap() {
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null)
   const [hoverValue, setHoverValue] = useState<number | null>(null)
 
-  const [players, setPlayers] = useState<string[]>([])
+  const [players, setPlayers] = useState<PlayerOption[]>([])
   const [selectedPlayer, setSelectedPlayer] = useState(ALL_PLAYERS)
   const [searchQuery, setSearchQuery] = useState('')
   const [showDropdown, setShowDropdown] = useState(false)
@@ -102,14 +102,14 @@ function TurnoverOriginsHeatmap() {
     return () => { cancelled = true }
   }, [selectedPlayer, selectedTeam, selectedOpponent])
 
-  const handlePlayerSelect = (player: string) => {
-    setSelectedPlayer(player)
-    setSearchQuery(player === ALL_PLAYERS ? '' : player)
+  const handlePlayerSelect = (id: string, name?: string) => {
+    setSelectedPlayer(id)
+    setSearchQuery(id === ALL_PLAYERS ? '' : (name ?? id))
     setShowDropdown(false)
   }
 
   const filteredPlayers = players.filter((p) =>
-    p.toLowerCase().includes(searchQuery.toLowerCase())
+    p.name.toLowerCase().includes(searchQuery.toLowerCase())
   )
 
   const getValueAtPosition = useCallback(
@@ -350,21 +350,21 @@ function TurnoverOriginsHeatmap() {
             </div>
             {filteredPlayers.slice(0, 20).map((p) => (
               <div
-                key={p}
-                onClick={() => handlePlayerSelect(p)}
+                key={p.id}
+                onClick={() => handlePlayerSelect(p.id, p.name)}
                 style={{
                   padding: '6px 12px',
                   cursor: 'pointer',
-                  color: p === selectedPlayer ? 'cyan' : 'white',
-                  backgroundColor: p === selectedPlayer ? '#3a3a5e' : 'transparent',
+                  color: p.id === selectedPlayer ? 'cyan' : 'white',
+                  backgroundColor: p.id === selectedPlayer ? '#3a3a5e' : 'transparent',
                 }}
                 onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#3a3a5e')}
                 onMouseLeave={(e) =>
                   (e.currentTarget.style.backgroundColor =
-                    p === selectedPlayer ? '#3a3a5e' : 'transparent')
+                    p.id === selectedPlayer ? '#3a3a5e' : 'transparent')
                 }
               >
-                {p}
+                {p.name}
               </div>
             ))}
           </div>
@@ -419,7 +419,7 @@ function TurnoverOriginsHeatmap() {
 
       {/* Selected filter label */}
       <div style={{ color: 'white', fontSize: '16px', fontWeight: 'bold' }}>
-        {selectedPlayer === ALL_PLAYERS ? 'All Players' : selectedPlayer}
+        {selectedPlayer === ALL_PLAYERS ? 'All Players' : (players.find(p => p.id === selectedPlayer)?.name ?? selectedPlayer)}
         {selectedTeam !== ALL_PLAYERS && ` (${selectedTeam})`}
         {selectedOpponent !== ALL_PLAYERS && ` vs ${selectedOpponent}`}
         {' — Turnover Origins'}
