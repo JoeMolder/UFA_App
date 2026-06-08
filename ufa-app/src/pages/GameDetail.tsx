@@ -18,7 +18,6 @@ function GameDetail() {
   const { gameId } = useParams<{ gameId: string }>()
   const navigate = useNavigate()
   const [game, setGame] = useState<Game | null>(null)
-  const [events, setEvents] = useState<GameEvent[]>([])
   const [points, setPoints] = useState<Point[]>([])
   const [selectedPointIndex, setSelectedPointIndex] = useState(0)
   const [teamFilter, setTeamFilter] = useState<string>('both') // 'both', 'home', 'away'
@@ -39,7 +38,6 @@ function GameDetail() {
         ])
 
         setGame(gameData)
-        setEvents(eventsData)
 
         // Parse events into points
         const parsedPoints = parseEventsIntoPoints(eventsData, gameData)
