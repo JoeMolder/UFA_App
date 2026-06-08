@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api, Game, GameEvent } from '../api/client'
+import { teamLabel } from '../utils'
 import FieldVisualization from '../components/FieldVisualization'
 import ScoreTimeline from '../components/ScoreTimeline'
 import '../styles/GameDetail.css'
@@ -138,7 +139,9 @@ function GameDetail() {
       <div className="game-header">
         <button onClick={() => navigate('/')} className="back-button">← Back</button>
         <h1>
-          {game.away_team_id} ({game.away_score}) @ {game.home_team_id} ({game.home_score})
+          <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => navigate(`/team/${game.away_team_id}`)}>{teamLabel(game.away_team_id)}</span>
+          {' '}({game.away_score}) @ <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => navigate(`/team/${game.home_team_id}`)}>{teamLabel(game.home_team_id)}</span>
+          {' '}({game.home_score})
         </h1>
         <p className="game-date">{game.game_date}</p>
       </div>
@@ -156,13 +159,13 @@ function GameDetail() {
             className={teamFilter === 'home' ? 'active' : ''}
             onClick={() => setTeamFilter('home')}
           >
-            {game.home_team_id}
+            {teamLabel(game.home_team_id)}
           </button>
           <button
             className={teamFilter === 'away' ? 'active' : ''}
             onClick={() => setTeamFilter('away')}
           >
-            {game.away_team_id}
+            {teamLabel(game.away_team_id)}
           </button>
         </div>
       </div>

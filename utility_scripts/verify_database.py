@@ -50,8 +50,8 @@ def verify():
     print("=" * 70)
     for row in cur.fetchall():
         event_name = {
-            1: "Start O Point",
-            2: "Start D Point",
+            1: "Start D Point (pulling team)",
+            2: "Start O Point (receiving team)",
             3: "Timeout",
             7: "Pull (inbounds)",
             8: "Pull (OB)",

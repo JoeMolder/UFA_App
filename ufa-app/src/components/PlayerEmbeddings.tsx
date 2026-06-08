@@ -1,6 +1,6 @@
-import { useRef, useEffect, useCallback, useState } from 'react'
+import { useRef, useEffect, useCallback, useState, useMemo } from 'react'
 import * as d3 from 'd3'
-import { PlayerStats, ClusterSummary } from '../api/client'
+import { PlayerStats } from '../api/client'
 
 interface PlayerData {
   name: string
@@ -14,7 +14,7 @@ interface PlayerEmbeddingsProps {
   coordinates: number[][]
   clusters: number[]
   playerStats: Record<string, PlayerStats>
-  clusterSummaries: Record<string, ClusterSummary>
+  nameMap: Record<string, string>
   selectedPlayer: string | null
   onPlayerClick?: (player: string) => void
 }
@@ -38,7 +38,7 @@ function getClusterColor(cluster: number): string {
   return CLUSTER_COLORS[cluster % CLUSTER_COLORS.length]
 }
 
-function PlayerEmbeddings({ players, coordinates, clusters, playerStats, clusterSummaries, selectedPlayer, onPlayerClick }: PlayerEmbeddingsProps) {
+function PlayerEmbeddings({ players, coordinates, clusters, playerStats, nameMap, selectedPlayer, onPlayerClick }: PlayerEmbeddingsProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const zoomRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null)
   const [hoveredPlayer, setHoveredPlayer] = useState<string | null>(null)
@@ -47,18 +47,16 @@ function PlayerEmbeddings({ players, coordinates, clusters, playerStats, cluster
   // The player shown in the side panel: pinned takes priority, then hovered
   const displayedPlayer = pinnedPlayer ?? hoveredPlayer
 
-  // Build data array
-  const data: PlayerData[] = players.map((name, i) => ({
+  // Memoize so D3 effect only re-runs when the actual data changes, not on every hover/pin state update
+  const data: PlayerData[] = useMemo(() => players.map((name, i) => ({
     name,
     x: coordinates[i][0],
     y: coordinates[i][1],
     cluster: clusters[i],
-  }))
+  })), [players, coordinates, clusters])
 
   // Unique clusters for legend
-  const uniqueClusters = [...new Set(clusters)].sort((a, b) => a - b)
-
-  const getNeighbors = useCallback(
+const getNeighbors = useCallback(
     (playerName: string, count: number) => {
       const player = data.find((d) => d.name === playerName)
       if (!player) return []
@@ -110,15 +108,17 @@ function PlayerEmbeddings({ players, coordinates, clusters, playerStats, cluster
       .attr('stroke', 'none')
       .attr('cursor', 'pointer')
       .on('mouseenter', function (_, d) {
-        d3.select(this).attr('r', 8).attr('fill', 'white').attr('fill-opacity', 1)
+        const k = d3.zoomTransform(svgRef.current!).k
+        d3.select(this).attr('r', 8 / k).attr('fill', 'white').attr('fill-opacity', 1)
         setHoveredPlayer(d.name)
       })
       .on('mouseleave', function (_, d) {
+        const k = d3.zoomTransform(svgRef.current!).k
         const isSelected = d.name === selectedPlayer
         const isNeighbor =
           selectedPlayer && getNeighbors(selectedPlayer, 10).some((n) => n.name === d.name)
         d3.select(this)
-          .attr('r', isSelected ? 8 : isNeighbor ? 6 : 5)
+          .attr('r', (isSelected ? 8 : isNeighbor ? 6 : 5) / k)
           .attr('fill', isSelected ? 'cyan' : getClusterColor(d.cluster))
           .attr('fill-opacity', isSelected ? 1 : isNeighbor ? 0.9 : 0.8)
         setHoveredPlayer(null)
@@ -137,7 +137,7 @@ function PlayerEmbeddings({ players, coordinates, clusters, playerStats, cluster
       .attr('class', 'player-label')
       .attr('x', (d) => xScale(d.x) + 8)
       .attr('y', (d) => yScale(d.y) + 4)
-      .text((d) => d.name)
+      .text((d) => nameMap[d.name] ?? d.name)
       .attr('fill', 'white')
       .attr('font-size', '10px')
       .attr('font-family', 'monospace')
@@ -175,6 +175,7 @@ function PlayerEmbeddings({ players, coordinates, clusters, playerStats, cluster
         g.selectAll<SVGTextElement, PlayerData>('.player-label')
           .attr('font-size', `${10 / k}px`)
           .attr('x', (d) => xScale(d.x) + 8 / k)
+          .attr('y', (d) => yScale(d.y) + 4 / k)
       })
 
     svg.call(zoom as any)
@@ -248,48 +249,6 @@ function PlayerEmbeddings({ players, coordinates, clusters, playerStats, cluster
           onClick={() => setPinnedPlayer(null)}
         />
 
-        {/* Cluster legend with stats */}
-        <div
-          style={{
-            position: 'absolute',
-            bottom: 12,
-            left: 12,
-            backgroundColor: 'rgba(0,0,0,0.8)',
-            padding: '10px 14px',
-            borderRadius: '6px',
-            maxHeight: '180px',
-            overflowY: 'auto',
-            fontSize: '11px',
-            fontFamily: 'monospace',
-          }}
-        >
-          {uniqueClusters.map((c) => {
-            const summary = clusterSummaries[String(c)]
-            return (
-              <div key={c} style={{ marginBottom: '6px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
-                  <div
-                    style={{
-                      width: 10,
-                      height: 10,
-                      borderRadius: '50%',
-                      backgroundColor: getClusterColor(c),
-                      flexShrink: 0,
-                    }}
-                  />
-                  <span style={{ color: 'white', fontWeight: 'bold' }}>
-                    C{c} ({summary?.count ?? '?'} players)
-                  </span>
-                </div>
-                {summary && (
-                  <div style={{ color: '#aaa', paddingLeft: '14px', lineHeight: '1.4' }}>
-                    {summary.avg_total_throws} throws · {summary.avg_completion_pct}% comp · {summary.avg_throw_dist}yd dist · {summary.avg_throw_depth}yd depth · {summary.avg_huck_rate}% huck · {summary.avg_lateral_dist}yd lateral
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
       </div>
 
       {/* Side panel — player stats */}
@@ -308,7 +267,7 @@ function PlayerEmbeddings({ players, coordinates, clusters, playerStats, cluster
         {displayedPlayer ? (
           <>
             <div style={{ fontWeight: 'bold', color: 'white', fontSize: '14px', marginBottom: '4px' }}>
-              {displayedPlayer}
+              {nameMap[displayedPlayer] ?? displayedPlayer}
               <span style={{ color: '#888', marginLeft: '8px', fontWeight: 'normal', fontSize: '12px' }}>
                 {(() => {
                   const p = data.find((d) => d.name === displayedPlayer)

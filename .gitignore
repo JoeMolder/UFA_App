@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Node
+ufa-app/node_modules/
+ufa-app/dist/
+ufa-app/.env.local
+
+# Models — keep active models, ignore checkpoints and dead weight
+models/lineup_xgb_checkpoint_auc0651.pkl
+models/completion_xgb.pkl
+models/epv_xgb.pkl
+models/pull_play_cvae.pkl
+models/completion_flow_model.pkl
+models/mdn_embedding_model.pkl
+
+# Database dump (upload to Railway manually, don't commit)
+*.dump
+
+# Notes / screenshots
+notes/
+
+# OS
+.DS_Store

@@ -1,8 +1,8 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { api, BatchPredictionResponse } from '../api/client'
+import { api, BatchPredictionResponse, PlayerOption } from '../api/client'
 
 interface ThrowHeatmapProps {
-  players: string[]
+  players: PlayerOption[]
 }
 
 // Hot colormap: black → red → yellow → white
@@ -16,7 +16,7 @@ function hotColor(t: number): [number, number, number, number] {
 
 function ThrowHeatmap({ players }: ThrowHeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [selectedPlayer, setSelectedPlayer] = useState(players[0] || '')
+  const [selectedPlayer, setSelectedPlayer] = useState(players[0]?.id || '')
   const [throwerPos, setThrowerPos] = useState({ x: 0, y: 60 })
   const [batchData, setBatchData] = useState<BatchPredictionResponse | null>(null)
   const [currentGrid, setCurrentGrid] = useState<number[][] | null>(null)
@@ -640,15 +640,17 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
   )
 
   // Player selection
-  const handlePlayerSelect = (player: string) => {
-    setSelectedPlayer(player)
-    setSearchQuery(player)
+  const handlePlayerSelect = (p: PlayerOption) => {
+    setSelectedPlayer(p.id)
+    setSearchQuery(p.name)
     setShowDropdown(false)
   }
 
   const filteredPlayers = players.filter((p) =>
-    p.toLowerCase().includes(searchQuery.toLowerCase())
+    p.name.toLowerCase().includes(searchQuery.toLowerCase())
   )
+
+  const selectedName = players.find((p) => p.id === selectedPlayer)?.name ?? selectedPlayer
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
@@ -691,21 +693,21 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
           >
             {filteredPlayers.slice(0, 20).map((p) => (
               <div
-                key={p}
+                key={p.id}
                 onClick={() => handlePlayerSelect(p)}
                 style={{
                   padding: '6px 12px',
                   cursor: 'pointer',
-                  color: p === selectedPlayer ? 'cyan' : 'white',
-                  backgroundColor: p === selectedPlayer ? '#3a3a5e' : 'transparent',
+                  color: p.id === selectedPlayer ? 'cyan' : 'white',
+                  backgroundColor: p.id === selectedPlayer ? '#3a3a5e' : 'transparent',
                 }}
                 onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#3a3a5e')}
                 onMouseLeave={(e) =>
                   (e.currentTarget.style.backgroundColor =
-                    p === selectedPlayer ? '#3a3a5e' : 'transparent')
+                    p.id === selectedPlayer ? '#3a3a5e' : 'transparent')
                 }
               >
-                {p}
+                {p.name}
               </div>
             ))}
           </div>
@@ -714,7 +716,7 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
 
       {/* Selected player label */}
       <div style={{ color: 'white', fontSize: '16px', fontWeight: 'bold' }}>
-        {selectedPlayer ? `${selectedPlayer} - Throw Prediction` : 'Select a player'}
+        {selectedPlayer ? `${selectedName} - Throw Prediction` : 'Select a player'}
       </div>
 
       {/* Canvas */}

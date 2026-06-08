@@ -11,5 +11,6 @@ nflows
 joblib
 numpy
 scikit-learn
+xgboost
 umap-learn
 hdbscan

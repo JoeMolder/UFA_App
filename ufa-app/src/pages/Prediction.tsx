@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api } from '../api/client'
+import { api, PlayerOption } from '../api/client'
 import ThrowHeatmap from '../components/ThrowHeatmap'
 
 function Prediction() {
-  const [players, setPlayers] = useState<string[]>([])
+  const [players, setPlayers] = useState<PlayerOption[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
