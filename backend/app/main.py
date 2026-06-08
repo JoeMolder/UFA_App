@@ -36,6 +36,7 @@ app.add_middleware(
 
 # Database connection — Railway provides DATABASE_URL; fall back to individual vars for local dev
 _database_url = os.getenv("DATABASE_URL")
+print(f"[startup] DATABASE_URL set: {bool(_database_url)}, host will be: {'railway' if _database_url else 'localhost'}")
 
 if _database_url:
     # Railway format: postgresql://user:pass@host:port/dbname
