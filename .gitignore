@@ -21,6 +21,12 @@ models/epv_xgb.pkl
 models/pull_play_cvae.pkl
 models/completion_flow_model.pkl
 models/mdn_embedding_model.pkl
+backend/models/lineup_xgb_checkpoint_auc0651.pkl
+backend/models/completion_xgb.pkl
+backend/models/epv_xgb.pkl
+backend/models/pull_play_cvae.pkl
+backend/models/completion_flow_model.pkl
+backend/models/mdn_embedding_model.pkl
 
 # Database dump (upload to Railway manually, don't commit)
 *.dump

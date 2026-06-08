@@ -36,7 +36,6 @@ app.add_middleware(
 
 # Database connection — Railway provides DATABASE_URL; fall back to individual vars for local dev
 _database_url = os.getenv("DATABASE_URL")
-print(f"[startup] DATABASE_URL set: {bool(_database_url)}, host will be: {'railway' if _database_url else 'localhost'}")
 
 if _database_url:
     # Railway format: postgresql://user:pass@host:port/dbname
@@ -150,7 +149,7 @@ def create_flow(n_players, num_layers=5, hidden_features=128, context_features=3
 
 
 # Load model at startup
-MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "normalizing_flow_model.pkl"
+MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "normalizing_flow_model.pkl"
 
 _flow = None
 _context_net = None
@@ -181,7 +180,7 @@ except Exception as e:
     print(f"Warning: Could not load ML model: {e}")
 
 # Load turnover flow model
-TURNOVER_MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "turnover_flow_model.pkl"
+TURNOVER_MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "turnover_flow_model.pkl"
 
 _turnover_flow = None
 _turnover_context_net = None
@@ -204,7 +203,7 @@ except Exception as e:
     print(f"Warning: Could not load turnover flow model: {e}")
 
 # Load block flow model (throwaways preceding blocks)
-BLOCK_MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "block_flow_model.pkl"
+BLOCK_MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "block_flow_model.pkl"
 
 _block_flow = None
 _block_context_net = None
@@ -252,7 +251,7 @@ class EPVNet(nn.Module):
         return self.net(x).squeeze(1)
 
 
-EPV_NN_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "epv_nn.pkl"
+EPV_NN_PATH = Path(__file__).resolve().parent.parent / "models" / "epv_nn.pkl"
 
 _epv_nn: Optional[EPVNet] = None
 _epv_scaler = None
@@ -290,7 +289,7 @@ class CompletionNet(nn.Module):
         return self.net(x).squeeze(1)
 
 # Load completion NN model (per-thrower P(completion | from, to))
-COMPLETION_NN_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "completion_nn.pkl"
+COMPLETION_NN_PATH = Path(__file__).resolve().parent.parent / "models" / "completion_nn.pkl"
 
 _completion_nn: Optional[CompletionNet] = None
 _completion_thrower_encoder = None
@@ -309,7 +308,7 @@ except Exception as e:
     print(f"Warning: Could not load completion NN model: {e}")
 
 # Load lineup XGBoost model (P(score) for a 7-player O-lineup)
-LINEUP_XGB_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "lineup_xgb.pkl"
+LINEUP_XGB_PATH = Path(__file__).resolve().parent.parent / "models" / "lineup_xgb.pkl"
 
 _lineup_xgb = None
 _lineup_player_stats: Dict[str, Dict[str, float]] = {}
