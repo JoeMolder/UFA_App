@@ -21,26 +21,43 @@ load_dotenv()
 
 app = FastAPI(title="UFA Analytics API")
 
-# CORS - allow your Vite frontend to call this API
+# CORS - allow frontend origins (local dev + production)
+_cors_origins = ["http://localhost:5173"]
+if os.getenv("FRONTEND_URL"):
+    _cors_origins.append(os.getenv("FRONTEND_URL"))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite default port
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Database connection config from environment variables
-DB_CONFIG = {
-    'dbname': os.getenv('DB_NAME', 'ufa_analytics'),
-    'user': os.getenv('DB_USER', 'joemolder'),
-    'password': os.getenv('DB_PASSWORD', ''),
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'port': int(os.getenv('DB_PORT', 5432))
-}
+# Database connection — Railway provides DATABASE_URL; fall back to individual vars for local dev
+_database_url = os.getenv("DATABASE_URL")
+
+if _database_url:
+    # Railway format: postgresql://user:pass@host:port/dbname
+    import urllib.parse
+    _u = urllib.parse.urlparse(_database_url)
+    DB_CONFIG = {
+        'dbname': _u.path.lstrip('/'),
+        'user': _u.username,
+        'password': _u.password,
+        'host': _u.hostname,
+        'port': _u.port or 5432,
+    }
+else:
+    DB_CONFIG = {
+        'dbname': os.getenv('DB_NAME', 'ufa_analytics'),
+        'user': os.getenv('DB_USER', 'joemolder'),
+        'password': os.getenv('DB_PASSWORD', ''),
+        'host': os.getenv('DB_HOST', 'localhost'),
+        'port': int(os.getenv('DB_PORT', 5432)),
+    }
 
 def get_db_connection():
-    """Create and return a database connection."""
     return psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
 
 
@@ -210,114 +227,6 @@ except Exception as e:
     print(f"Warning: Could not load block flow model: {e}")
 
 # Load completion flow model (for relative density computation)
-COMPLETION_MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "completion_flow_model.pkl"
-
-_completion_flow = None
-_completion_context_net = None
-
-try:
-    completion_save = joblib.load(COMPLETION_MODEL_PATH)
-    completion_hp = completion_save["hyperparameters"]
-
-    _completion_flow, _completion_context_net = create_turnover_flow(
-        num_layers=completion_hp["num_layers"],
-        hidden_features=completion_hp["hidden_features"],
-        context_features=completion_hp["context_features"],
-    )
-    _completion_flow.load_state_dict(completion_save["flow_state_dict"])
-    _completion_context_net.load_state_dict(completion_save["context_net_state_dict"])
-    _completion_flow.eval()
-    _completion_context_net.eval()
-    print(f"Completion flow model loaded from {COMPLETION_MODEL_PATH}")
-except Exception as e:
-    print(f"Warning: Could not load completion flow model: {e}")
-
-# Load pull play CVAE model
-class PullPlayCVAE(nn.Module):
-    """Conditional VAE for pull play sequences (with z-skip decoder)."""
-    def __init__(self, n_teams, seq_dim=12, latent_dim=16,
-                 team_embed_dim=8, condition_dim=16, hidden_dim=128):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.seq_dim = seq_dim
-        self.team_embedding = nn.Embedding(n_teams + 1, team_embed_dim)
-        self.condition_net = nn.Sequential(
-            nn.Linear(2 + team_embed_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, condition_dim),
-        )
-        self.encoder = nn.Sequential(
-            nn.Linear(seq_dim + condition_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-        )
-        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.fc_log_var = nn.Linear(hidden_dim, latent_dim)
-        # Decoder with z injected at two layers to prevent posterior collapse
-        self.decoder_fc1 = nn.Sequential(
-            nn.Linear(latent_dim + condition_dim, hidden_dim),
-            nn.ReLU(),
-        )
-        self.decoder_fc2 = nn.Sequential(
-            nn.Linear(hidden_dim + latent_dim, hidden_dim),
-            nn.ReLU(),
-        )
-        self.decoder_out = nn.Sequential(
-            nn.Linear(hidden_dim, seq_dim),
-            nn.Sigmoid(),
-        )
-
-    def get_condition(self, pull_pos, team_ids):
-        team_emb = self.team_embedding(team_ids)
-        combined = torch.cat([pull_pos, team_emb], dim=1)
-        return self.condition_net(combined)
-
-    def decode(self, z, condition):
-        h = self.decoder_fc1(torch.cat([z, condition], dim=1))
-        h = self.decoder_fc2(torch.cat([h, z], dim=1))
-        return self.decoder_out(h)
-
-    def sample(self, pull_pos, team_ids, n_samples=1):
-        self.eval()
-        with torch.no_grad():
-            condition = self.get_condition(pull_pos, team_ids)
-            condition = condition.repeat(n_samples, 1)
-            z = torch.randn(n_samples, self.latent_dim)
-            return self.decode(z, condition)
-
-
-CVAE_MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "pull_play_cvae.pkl"
-
-_cvae_model: Optional[PullPlayCVAE] = None
-_cvae_team_encoder = None
-_cvae_cluster_centers: Optional[np.ndarray] = None  # [K, latent_dim] latent centers
-_cvae_cluster_counts: Optional[np.ndarray] = None   # [K] sequence counts
-
-try:
-    cvae_save = joblib.load(CVAE_MODEL_PATH)
-    cvae_hp = cvae_save["hyperparameters"]
-    _cvae_team_encoder = cvae_save["team_encoder"]
-
-    _cvae_model = PullPlayCVAE(
-        n_teams=cvae_save["n_real_teams"],
-        seq_dim=cvae_hp["seq_dim"],
-        latent_dim=cvae_hp["latent_dim"],
-        team_embed_dim=cvae_hp["team_embed_dim"],
-        condition_dim=cvae_hp["condition_dim"],
-        hidden_dim=cvae_hp["hidden_dim"],
-    )
-    _cvae_model.load_state_dict(cvae_save["model_state_dict"])
-    _cvae_model.eval()
-
-    if "kmeans" in cvae_save:
-        _cvae_cluster_centers = cvae_save["kmeans"].cluster_centers_  # [K, latent_dim]
-        _cvae_cluster_counts = cvae_save["cluster_counts"]
-        print(f"Pull play CVAE loaded ({len(_cvae_cluster_centers)} cluster archetypes)")
-    else:
-        print("Pull play CVAE loaded (no cluster data)")
-except Exception as e:
-    print(f"Warning: Could not load pull play CVAE: {e}")
 
 
 # Load EPV (Expected Possession Value) models
@@ -342,21 +251,11 @@ class EPVNet(nn.Module):
         return self.net(x).squeeze(1)
 
 
-EPV_XGB_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "epv_xgb.pkl"
 EPV_NN_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "epv_nn.pkl"
 
-_epv_xgb = None
 _epv_nn: Optional[EPVNet] = None
 _epv_scaler = None
 _epv_team_encoder = None
-
-try:
-    epv_xgb_save = joblib.load(EPV_XGB_PATH)
-    _epv_xgb = epv_xgb_save["model"]
-    _epv_team_encoder = epv_xgb_save["team_encoder"]
-    print(f"EPV XGBoost loaded (AUC={epv_xgb_save['metrics']['auc']:.4f})")
-except Exception as e:
-    print(f"Warning: Could not load EPV XGBoost model: {e}")
 
 try:
     epv_nn_save = joblib.load(EPV_NN_PATH)
@@ -370,19 +269,43 @@ try:
 except Exception as e:
     print(f"Warning: Could not load EPV neural net model: {e}")
 
-# Load completion XGBoost model (per-thrower P(completion | from, to))
-COMPLETION_XGB_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "completion_xgb.pkl"
+# Completion NN model definition (must match completion_nn.ipynb)
+class CompletionNet(nn.Module):
+    def __init__(self, n_throwers, embed_dim=16, hidden=(128, 64, 32), dropout=0.3):
+        super().__init__()
+        self.embed = nn.Embedding(n_throwers, embed_dim)
+        in_dim = 8 + embed_dim
+        layers = []
+        for h in hidden:
+            layers += [nn.Linear(in_dim, h), nn.BatchNorm1d(h), nn.ReLU(), nn.Dropout(dropout)]
+            in_dim = h
+            dropout = max(dropout - 0.1, 0.1)
+        layers.append(nn.Linear(in_dim, 1))
+        self.net = nn.Sequential(*layers)
 
-_completion_xgb = None
+    def forward(self, x_cont, x_throw):
+        emb = self.embed(x_throw)
+        x = torch.cat([x_cont, emb], dim=1)
+        return self.net(x).squeeze(1)
+
+# Load completion NN model (per-thrower P(completion | from, to))
+COMPLETION_NN_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "completion_nn.pkl"
+
+_completion_nn: Optional[CompletionNet] = None
 _completion_thrower_encoder = None
+_completion_scaler = None
 
 try:
-    completion_xgb_save = joblib.load(COMPLETION_XGB_PATH)
-    _completion_xgb = completion_xgb_save["model"]
-    _completion_thrower_encoder = completion_xgb_save["encoder"]
-    print(f"Completion XGBoost loaded (AUC={completion_xgb_save['metrics']['auc']:.4f}, {len(_completion_thrower_encoder.classes_)} throwers)")
+    completion_nn_save = joblib.load(COMPLETION_NN_PATH)
+    cfg = completion_nn_save["model_config"]
+    _completion_nn = CompletionNet(**cfg)
+    _completion_nn.load_state_dict(completion_nn_save["model_state"])
+    _completion_nn.eval()
+    _completion_thrower_encoder = completion_nn_save["encoder"]
+    _completion_scaler = completion_nn_save["scaler"]
+    print(f"Completion NN loaded (AUC={completion_nn_save['metrics']['auc']:.4f}, {len(_completion_thrower_encoder.classes_)} throwers)")
 except Exception as e:
-    print(f"Warning: Could not load completion XGBoost model: {e}")
+    print(f"Warning: Could not load completion NN model: {e}")
 
 # Load lineup XGBoost model (P(score) for a 7-player O-lineup)
 LINEUP_XGB_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "lineup_xgb.pkl"
@@ -722,11 +645,17 @@ def get_stats_summary() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.get("/players")
-def get_players() -> List[str]:
-    """Get list of player names available for throw prediction."""
+def get_players():
+    """Get list of players available for throw prediction, with full names."""
     if not _player_names:
         raise HTTPException(status_code=503, detail="Model not loaded")
-    return _player_names
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT player_id, full_name FROM players WHERE player_id = ANY(%s)", (_player_names,))
+    name_map = {r["player_id"]: r["full_name"] for r in cur.fetchall()}
+    cur.close()
+    conn.close()
+    return [{"id": p, "name": name_map.get(p, p)} for p in _player_names]
 
 
 @app.get("/teams")
@@ -947,6 +876,31 @@ def get_team(team_id: str, year: Optional[int] = None):
     """, year_params_1)
     synergy_rows = cur.fetchall()
 
+    # Roster: all players who appeared on O or D line for this team (optionally in a given year)
+    cur.execute(f"""
+        SELECT
+            lp.player_id,
+            p.full_name,
+            COUNT(*) FILTER (WHERE lp.line_type = 'O') AS o_appearances,
+            COUNT(*) FILTER (WHERE lp.line_type = 'D') AS d_appearances
+        FROM line_players lp
+        JOIN events e ON e.event_id = lp.event_id
+        JOIN players p ON p.player_id = lp.player_id
+        WHERE e.team = %s {year_filter}
+        GROUP BY lp.player_id, p.full_name
+        ORDER BY (COUNT(*) FILTER (WHERE lp.line_type = 'O') + COUNT(*) FILTER (WHERE lp.line_type = 'D')) DESC
+    """, year_params_1)
+    roster_rows = cur.fetchall()
+    roster = [
+        {
+            "id": r["player_id"],
+            "name": r["full_name"],
+            "o_appearances": int(r["o_appearances"] or 0),
+            "d_appearances": int(r["d_appearances"] or 0),
+        }
+        for r in roster_rows
+    ]
+
     cur.close()
     conn.close()
 
@@ -963,6 +917,7 @@ def get_team(team_id: str, year: Optional[int] = None):
         },
         "o_line_rate": round(o_line_rate, 4),
         "top_players": top_players,
+        "roster": roster,
         "top_synergies": [
             {
                 "player1": {"id": r['p1'], "name": r['p1_name']},
@@ -984,18 +939,25 @@ def get_player_embeddings() -> Dict[str, Any]:
     if _umap_coordinates is None or _player_encoder is None or _cluster_labels is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    # Return in label encoder order (matches embedding matrix row order)
     players = _player_encoder.classes_.tolist()
-    # Per-player stats (keyed by name)
     player_stats = {p: _player_stats[p] for p in players if p in _player_stats}
-    # Cluster summaries (keyed by cluster id as string)
     cluster_info = {str(k): v for k, v in _cluster_summaries.items()}
+
+    # Resolve player IDs to full names
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT player_id, full_name FROM players WHERE player_id = ANY(%s)", (players,))
+    name_map = {r["player_id"]: r["full_name"] for r in cur.fetchall()}
+    cur.close()
+    conn.close()
+
     return {
         "players": players,
         "coordinates": _umap_coordinates.tolist(),
         "clusters": _cluster_labels.tolist(),
         "player_stats": player_stats,
         "cluster_summaries": cluster_info,
+        "name_map": name_map,
     }
 
 
@@ -1122,54 +1084,6 @@ def predict_turnovers(
         probs = torch.exp(log_probs).numpy()
 
         grid = probs.reshape(len(y_bins), len(x_bins))
-
-    return {
-        "grid": grid.tolist(),
-        "extent": [-25, 25, 0, 120],
-    }
-
-
-@app.get("/predict/relative-density")
-def predict_relative_density(
-    x: float = Query(..., description="Thrower X position (-25 to 25)"),
-    y: float = Query(..., description="Thrower Y position (0 to 120)"),
-    grid_size: int = Query(30, ge=10, le=200, description="Grid resolution"),
-) -> Dict[str, Any]:
-    """Compute turnover/completion density ratio from a field position.
-
-    High values = turnovers land here disproportionately vs completions.
-    """
-    if _turnover_flow is None or _turnover_context_net is None:
-        raise HTTPException(status_code=503, detail="Turnover model not loaded")
-    if _completion_flow is None or _completion_context_net is None:
-        raise HTTPException(status_code=503, detail="Completion model not loaded")
-
-    x_norm = (x + 25) / 50
-    y_norm = y / 120
-    context_input = torch.FloatTensor([[x_norm, y_norm]])
-
-    with torch.no_grad():
-        x_bins = np.linspace(0, 1, grid_size)
-        y_bins = np.linspace(0, 1, int(grid_size * 1.2))
-        xx, yy = np.meshgrid(x_bins, y_bins)
-        grid_points = torch.FloatTensor(np.stack([xx.ravel(), yy.ravel()], axis=1))
-
-        # Turnover density
-        turnover_ctx = _turnover_context_net(context_input)
-        turnover_expanded = turnover_ctx.expand(grid_points.shape[0], -1)
-        turnover_log_probs = _turnover_flow.log_prob(grid_points, context=turnover_expanded)
-        turnover_probs = torch.exp(turnover_log_probs).numpy()
-
-        # Completion density
-        completion_ctx = _completion_context_net(context_input)
-        completion_expanded = completion_ctx.expand(grid_points.shape[0], -1)
-        completion_log_probs = _completion_flow.log_prob(grid_points, context=completion_expanded)
-        completion_probs = torch.exp(completion_log_probs).numpy()
-
-        # Ratio: turnover / completion (with small epsilon to avoid division by zero)
-        epsilon = 1e-8
-        ratio = turnover_probs / (completion_probs + epsilon)
-        grid = ratio.reshape(len(y_bins), len(x_bins))
 
     return {
         "grid": grid.tolist(),
@@ -1485,194 +1399,6 @@ def get_turnover_origins(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-def _cvae_predict(pull_x: float, pull_y: float, team: Optional[str], n_samples: int = 1) -> List[Dict]:
-    """Use CVAE to generate throw sequence(s). Returns list of sequences."""
-    if _cvae_model is None or _cvae_team_encoder is None:
-        raise HTTPException(status_code=503, detail="CVAE model not loaded")
-
-    pull_x_norm = (pull_x + 25) / 50
-    pull_y_norm = pull_y / 120
-    pull_tensor = torch.FloatTensor([[pull_x_norm, pull_y_norm]])
-
-    if team and team in _cvae_team_encoder.classes_:
-        team_id = int(_cvae_team_encoder.transform([team])[0]) + 1
-    else:
-        team_id = 0  # all-teams token
-    team_tensor = torch.LongTensor([team_id])
-
-    samples = _cvae_model.sample(pull_tensor, team_tensor, n_samples=n_samples).numpy()
-
-    def denorm(seq):
-        # x coords at indices 0,2,4,6,8,10: [0,1] -> [-25,25]
-        # y coords at indices 1,3,5,7,9,11: [0,1] -> [0,120]
-        result = seq.copy()
-        for i in [0, 2, 4, 6, 8, 10]:
-            result[i] = float(result[i]) * 50 - 25
-        for i in [1, 3, 5, 7, 9, 11]:
-            result[i] = float(result[i]) * 120
-        return result
-
-    sequences = []
-    for s in range(n_samples):
-        seq = denorm(samples[s])
-        sequences.append([
-            {"from_x": round(float(seq[0]), 1), "from_y": round(float(seq[1]), 1),
-             "to_x": round(float(seq[2]), 1), "to_y": round(float(seq[3]), 1)},
-            {"from_x": round(float(seq[4]), 1), "from_y": round(float(seq[5]), 1),
-             "to_x": round(float(seq[6]), 1), "to_y": round(float(seq[7]), 1)},
-            {"from_x": round(float(seq[8]), 1), "from_y": round(float(seq[9]), 1),
-             "to_x": round(float(seq[10]), 1), "to_y": round(float(seq[11]), 1)},
-        ])
-    return sequences
-
-
-@app.get("/pull-play/sequence")
-def get_pull_play_sequence(
-    pull_x: float = Query(0.0, description="Pull landing X position (-25 to 25)"),
-    pull_y: float = Query(90.0, description="Pull landing Y position (0 to 120)"),
-    team: Optional[str] = Query(None, description="Receiving team (omit for all teams)"),
-    radius: float = Query(15.0, ge=1, le=50, description="Search radius in yards around pull landing"),
-    mode: str = Query("model", description="'model' for CVAE prediction, 'average' for data average"),
-) -> Dict[str, Any]:
-    """Return first 3 throws after a pull landing using CVAE model or data average."""
-    try:
-        # CVAE model mode
-        if mode == "model":
-            sequences = _cvae_predict(pull_x, pull_y, team, n_samples=1)
-            return {
-                "throws": sequences[0],
-                "sample_size": None,
-                "pull_landing": {"x": pull_x, "y": pull_y},
-                "scoring_rate": None,
-                "mode": "model",
-            }
-
-        # Data average mode
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        team_filter = "AND recv_team = %s" if team else ""
-        params: list = [pull_x, pull_y, radius]
-        if team:
-            params.append(team)
-
-        cur.execute(f"""
-            WITH pull_data AS (
-                SELECT
-                    p.game_id, p.event_number AS pull_num,
-                    CASE WHEN recv.team = g.away_team_id THEN -p.pull_x ELSE p.pull_x END AS norm_pull_x,
-                    CASE WHEN recv.team = g.away_team_id THEN 120 - p.pull_y ELSE p.pull_y END AS norm_pull_y,
-                    recv.team AS recv_team,
-                    CASE WHEN recv.team = g.away_team_id THEN TRUE ELSE FALSE END AS is_away
-                FROM events p
-                JOIN games g ON p.game_id = g.game_id
-                JOIN events recv ON p.game_id = recv.game_id
-                    AND recv.event_number = p.event_number + 1
-                    AND recv.event_type IN (18, 19, 20, 22)
-                WHERE p.event_type = 7
-                  AND p.pull_x IS NOT NULL AND p.pull_y IS NOT NULL
-            ),
-            nearby_pulls AS (
-                SELECT *
-                FROM pull_data
-                WHERE SQRT(POWER(norm_pull_x - %s, 2) + POWER(norm_pull_y - %s, 2)) <= %s
-                {team_filter}
-            ),
-            throw_sequences AS (
-                SELECT
-                    np.game_id, np.pull_num, np.is_away,
-                    CASE WHEN np.is_away THEN -e1.thrower_x ELSE e1.thrower_x END AS t1_fx,
-                    CASE WHEN np.is_away THEN 120 - e1.thrower_y ELSE e1.thrower_y END AS t1_fy,
-                    CASE WHEN np.is_away THEN -e1.receiver_x ELSE e1.receiver_x END AS t1_tx,
-                    CASE WHEN np.is_away THEN 120 - e1.receiver_y ELSE e1.receiver_y END AS t1_ty,
-                    CASE WHEN np.is_away THEN -e2.thrower_x ELSE e2.thrower_x END AS t2_fx,
-                    CASE WHEN np.is_away THEN 120 - e2.thrower_y ELSE e2.thrower_y END AS t2_fy,
-                    CASE WHEN np.is_away THEN -e2.receiver_x ELSE e2.receiver_x END AS t2_tx,
-                    CASE WHEN np.is_away THEN 120 - e2.receiver_y ELSE e2.receiver_y END AS t2_ty,
-                    CASE WHEN np.is_away THEN -e3.thrower_x ELSE e3.thrower_x END AS t3_fx,
-                    CASE WHEN np.is_away THEN 120 - e3.thrower_y ELSE e3.thrower_y END AS t3_fy,
-                    CASE WHEN np.is_away THEN -e3.receiver_x ELSE e3.receiver_x END AS t3_tx,
-                    CASE WHEN np.is_away THEN 120 - e3.receiver_y ELSE e3.receiver_y END AS t3_ty,
-                    EXISTS (
-                        SELECT 1 FROM events eg
-                        WHERE eg.game_id = np.game_id
-                          AND eg.event_number > np.pull_num
-                          AND eg.event_number <= np.pull_num + 30
-                          AND eg.event_type = 19
-                          AND eg.team = e1.team
-                    ) AS scored
-                FROM nearby_pulls np
-                JOIN events e1 ON np.game_id = e1.game_id AND e1.event_number = np.pull_num + 1
-                JOIN events e2 ON np.game_id = e2.game_id AND e2.event_number = np.pull_num + 2
-                JOIN events e3 ON np.game_id = e3.game_id AND e3.event_number = np.pull_num + 3
-                WHERE e1.event_type IN (18, 19) AND e1.receiver_x IS NOT NULL
-                  AND e2.event_type IN (18, 19) AND e2.receiver_x IS NOT NULL
-                  AND e3.event_type IN (18, 19) AND e3.receiver_x IS NOT NULL
-                  AND e1.team = e2.team AND e2.team = e3.team
-            )
-            SELECT
-                AVG(t1_fx) AS t1_fx, AVG(t1_fy) AS t1_fy, AVG(t1_tx) AS t1_tx, AVG(t1_ty) AS t1_ty,
-                AVG(t2_fx) AS t2_fx, AVG(t2_fy) AS t2_fy, AVG(t2_tx) AS t2_tx, AVG(t2_ty) AS t2_ty,
-                AVG(t3_fx) AS t3_fx, AVG(t3_fy) AS t3_fy, AVG(t3_tx) AS t3_tx, AVG(t3_ty) AS t3_ty,
-                COUNT(*) AS sample_size,
-                AVG(CASE WHEN scored THEN 1.0 ELSE 0.0 END) AS scoring_rate
-            FROM throw_sequences
-        """, params)
-
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        if not row or row['sample_size'] == 0:
-            return {
-                "throws": [],
-                "sample_size": 0,
-                "pull_landing": {"x": pull_x, "y": pull_y},
-                "scoring_rate": 0,
-            }
-
-        return {
-            "throws": [
-                {"from_x": round(float(row['t1_fx']), 1), "from_y": round(float(row['t1_fy']), 1),
-                 "to_x": round(float(row['t1_tx']), 1), "to_y": round(float(row['t1_ty']), 1)},
-                {"from_x": round(float(row['t2_fx']), 1), "from_y": round(float(row['t2_fy']), 1),
-                 "to_x": round(float(row['t2_tx']), 1), "to_y": round(float(row['t2_ty']), 1)},
-                {"from_x": round(float(row['t3_fx']), 1), "from_y": round(float(row['t3_fy']), 1),
-                 "to_x": round(float(row['t3_tx']), 1), "to_y": round(float(row['t3_ty']), 1)},
-            ],
-            "sample_size": int(row['sample_size']),
-            "pull_landing": {"x": pull_x, "y": pull_y},
-            "scoring_rate": round(float(row['scoring_rate']), 3),
-            "mode": "average",
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/pull-play/sample")
-def sample_pull_plays(
-    pull_x: float = Query(0.0, description="Pull landing X position (-25 to 25)"),
-    pull_y: float = Query(20.0, description="Pull landing Y position (0 to 120)"),
-    team: Optional[str] = Query(None, description="Receiving team (omit for all teams)"),
-    n_samples: int = Query(5, ge=1, le=20, description="Number of sequences to sample"),
-) -> Dict[str, Any]:
-    """Sample multiple distinct play sequences from the CVAE latent space."""
-    try:
-        sequences = _cvae_predict(pull_x, pull_y, team, n_samples=n_samples)
-        return {
-            "sequences": sequences,
-            "pull_landing": {"x": pull_x, "y": pull_y},
-            "n_samples": n_samples,
-            "team": team,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/possession/zone-patterns")
@@ -2014,31 +1740,25 @@ def get_pull_play_clusters(
     return {"clusters": result_clusters, "n_clusters": best_k, "sample_size": total}
 
 
-def _epv_predict_batch(grid_points: np.ndarray, model_type: str) -> np.ndarray:
-    """Run EPV inference on a batch of feature rows."""
-    if model_type == "xgb":
-        return _epv_xgb.predict_proba(grid_points)[:, 1]
-    else:
-        scaled = _epv_scaler.transform(grid_points)
-        _epv_nn.eval()
-        with torch.no_grad():
-            return _epv_nn(torch.FloatTensor(scaled)).numpy()
+def _epv_predict_batch(grid_points: np.ndarray) -> np.ndarray:
+    """Run EPV NN inference on a batch of feature rows."""
+    scaled = _epv_scaler.transform(grid_points)
+    _epv_nn.eval()
+    with torch.no_grad():
+        return _epv_nn(torch.FloatTensor(scaled)).numpy()
 
 
 @app.get("/epv/heatmap")
 def get_epv_heatmap(
     throw_idx: int = Query(1, ge=1, le=10, description="Throw number within possession (1-10)"),
     team: Optional[str] = Query(None, description="Team name for team-specific EPV (omit for league average)"),
-    model: str = Query("xgb", description="Model to use: 'xgb' or 'nn'"),
     quarter: Optional[int] = Query(None, ge=1, le=4, description="Game quarter 1-4 (omit for average over all quarters)"),
 ) -> Dict[str, Any]:
     """
     Return EPV probability grid over the field.
     Grid shape: 60 rows (y) × 25 cols (x), values in [0, 1].
     """
-    if model == "xgb" and _epv_xgb is None:
-        raise HTTPException(status_code=503, detail="EPV XGBoost model not loaded. Run epv_model.ipynb first.")
-    if model == "nn" and _epv_nn is None:
+    if _epv_nn is None:
         raise HTTPException(status_code=503, detail="EPV Neural Net model not loaded. Run epv_model.ipynb first.")
     if _epv_team_encoder is None:
         raise HTTPException(status_code=503, detail="EPV team encoder not loaded.")
@@ -2074,7 +1794,7 @@ def get_epv_heatmap(
                     np.full(n_points, tid),
                     np.full(n_points, q),
                 ]).astype(np.float32)
-                all_probs[idx] = _epv_predict_batch(gp, model)
+                all_probs[idx] = _epv_predict_batch(gp)
                 idx += 1
 
         grid = all_probs.mean(axis=0).reshape(60, 25)
@@ -2096,11 +1816,30 @@ def get_epv_heatmap(
 # ---------------------------------------------------------------------------
 
 @app.get("/completion/throwers")
-def get_completion_throwers() -> List[str]:
-    """Return sorted list of thrower names known to the completion model."""
+def get_completion_throwers():
+    """Return sorted list of throwers known to the completion model, with full names."""
     if _completion_thrower_encoder is None:
-        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_model.ipynb first.")
-    return sorted(_completion_thrower_encoder.classes_.tolist())
+        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_nn.ipynb first.")
+    slugs = sorted(_completion_thrower_encoder.classes_.tolist())
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT player_id, full_name FROM players WHERE player_id = ANY(%s)", (slugs,))
+    name_map = {r["player_id"]: r["full_name"] for r in cur.fetchall()}
+    cur.close()
+    conn.close()
+    return [{"id": s, "name": name_map.get(s, s)} for s in slugs]
+
+
+def _completion_nn_infer(X_cont: np.ndarray, thrower_enc: int) -> np.ndarray:
+    """Run NN inference on a batch of continuous features with a single thrower index."""
+    X_scaled = _completion_scaler.transform(X_cont).astype(np.float32)
+    X_throw = np.full(len(X_cont), thrower_enc, dtype=np.int64)
+    with torch.no_grad():
+        logits = _completion_nn(
+            torch.FloatTensor(X_scaled),
+            torch.LongTensor(X_throw),
+        )
+        return torch.sigmoid(logits).numpy()
 
 
 @app.get("/completion/heatmap")
@@ -2113,14 +1852,12 @@ def get_completion_heatmap(
     Return completion probability grid for all target positions from a given origin.
     Grid shape: 60 rows (y) × 25 cols (x), values in [0, 1].
     """
-    if _completion_xgb is None or _completion_thrower_encoder is None:
-        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_model.ipynb first.")
+    if _completion_nn is None or _completion_thrower_encoder is None:
+        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_nn.ipynb first.")
 
     try:
-        if thrower in _completion_thrower_encoder.classes_:
-            thrower_enc = int(_completion_thrower_encoder.transform([thrower])[0])
-        else:
-            thrower_enc = 0  # fallback to first encoded class
+        thrower_enc = int(_completion_thrower_encoder.transform([thrower])[0]) \
+            if thrower in _completion_thrower_encoder.classes_ else 0
 
         xs = np.linspace(-25, 25, 25)
         ys = np.linspace(0, 120, 60)
@@ -2133,15 +1870,14 @@ def get_completion_heatmap(
         dist = np.sqrt(dx**2 + dy**2)
         angle = np.arctan2(dy, dx)
 
-        grid_points = np.column_stack([
+        X_cont = np.column_stack([
             np.full(xx.size, from_x),
             np.full(xx.size, from_y),
             to_x, to_y,
             dist, dy, dx, angle,
-            np.full(xx.size, thrower_enc),
         ]).astype(np.float32)
 
-        probs = _completion_xgb.predict_proba(grid_points)[:, 1]
+        probs = _completion_nn_infer(X_cont, thrower_enc)
         grid = probs.reshape(60, 25)
 
         return {
@@ -2162,22 +1898,20 @@ def get_completion_predict(
     to_y: float = Query(..., description="Throw target Y (0 to 120)"),
 ) -> Dict[str, Any]:
     """Return completion probability for a single from→to throw by a specific thrower."""
-    if _completion_xgb is None or _completion_thrower_encoder is None:
-        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_model.ipynb first.")
+    if _completion_nn is None or _completion_thrower_encoder is None:
+        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_nn.ipynb first.")
 
     try:
-        if thrower in _completion_thrower_encoder.classes_:
-            thrower_enc = int(_completion_thrower_encoder.transform([thrower])[0])
-        else:
-            thrower_enc = 0
+        thrower_enc = int(_completion_thrower_encoder.transform([thrower])[0]) \
+            if thrower in _completion_thrower_encoder.classes_ else 0
 
         dy = to_y - from_y
         dx = to_x - from_x
         dist = float(np.sqrt(dx**2 + dy**2))
         angle = float(np.arctan2(dy, dx))
 
-        row = np.array([[from_x, from_y, to_x, to_y, dist, dy, dx, angle, thrower_enc]], dtype=np.float32)
-        prob = float(_completion_xgb.predict_proba(row)[0, 1])
+        X_cont = np.array([[from_x, from_y, to_x, to_y, dist, dy, dx, angle]], dtype=np.float32)
+        prob = float(_completion_nn_infer(X_cont, thrower_enc)[0])
 
         return {"probability": round(prob, 4), "thrower": thrower}
 
@@ -2388,6 +2122,348 @@ def predict_lineup(
         "probability": round(prob, 4),
         "players": [{"id": pid, "name": names.get(pid, pid)} for pid in lineup],
         "known_players": len(o_stats),
+    }
+
+
+def _combined_scoring_rate_for_pair(cur, p1: str, p2: str):
+    """Returns (shared_possessions, combined_scoring_rate) for an O-line pair."""
+    cur.execute("""
+        WITH shared_o_starts AS (
+            SELECT lp1.event_id, e.game_id, e.event_number, e.team
+            FROM line_players lp1
+            JOIN line_players lp2 ON lp2.event_id = lp1.event_id
+                AND lp2.player_id = %(p2)s AND lp2.line_type = 'O'
+            JOIN events e ON e.event_id = lp1.event_id
+            WHERE lp1.player_id = %(p1)s AND lp1.line_type = 'O'
+        ),
+        outcomes AS (
+            SELECT os.event_id,
+                COALESCE(BOOL_OR(e2.event_type = 19 AND e2.team = os.team), FALSE) AS scored
+            FROM shared_o_starts os
+            LEFT JOIN events e2 ON e2.game_id = os.game_id
+                AND e2.event_number > os.event_number
+                AND e2.event_number < COALESCE(
+                    (SELECT MIN(e3.event_number) FROM events e3
+                     WHERE e3.game_id = os.game_id AND e3.event_type = 1
+                       AND e3.event_number > os.event_number),
+                    9999999
+                )
+            GROUP BY os.event_id
+        )
+        SELECT COUNT(*) as shared_possessions,
+               ROUND(AVG(CASE WHEN scored THEN 1.0 ELSE 0.0 END)::numeric, 4) as combined_rate
+        FROM outcomes
+    """, {"p1": p1, "p2": p2})
+    row = cur.fetchone()
+    return int(row["shared_possessions"]), float(row["combined_rate"] or 0)
+
+
+@app.get("/player/{player_id}")
+def get_player(player_id: str, year: Optional[int] = None):
+    """Per-player stats: season table, career totals, top connections, synergy partners."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # Player info
+    cur.execute("SELECT player_id, full_name FROM players WHERE player_id = %s", (player_id,))
+    player_row = cur.fetchone()
+    if not player_row:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail=f"Player '{player_id}' not found")
+    player_name = player_row["full_name"]
+
+    # Available years
+    cur.execute("""
+        SELECT DISTINCT year FROM events
+        WHERE (thrower = %s OR receiver = %s) AND year IS NOT NULL
+        ORDER BY year
+    """, (player_id, player_id))
+    available_years = [r["year"] for r in cur.fetchall()]
+
+    yf_plain = "AND year = %s" if year else ""
+    yf_e = "AND e.year = %s" if year else ""
+    yp1 = (player_id, year) if year else (player_id,)
+
+    # Per-season throwing stats (GROUP BY year, team)
+    cur.execute(f"""
+        SELECT year, team,
+            COUNT(*) FILTER (WHERE event_type IN (18,19,20,22)) AS throw_attempts,
+            COUNT(*) FILTER (WHERE event_type IN (18,19)) AS completions,
+            COUNT(*) FILTER (WHERE event_type = 19) AS assists,
+            COUNT(*) FILTER (WHERE event_type IN (20,22)) AS turnovers,
+            COUNT(*) FILTER (WHERE event_type IN (18,19) AND receiver_y IS NOT NULL
+                AND ABS(receiver_y - thrower_y) > 30) AS huck_completions,
+            COUNT(*) FILTER (WHERE event_type IN (18,19,20) AND receiver_y IS NOT NULL
+                AND ABS(receiver_y - thrower_y) > 30) AS huck_attempts,
+            ROUND(AVG(CASE WHEN event_type IN (18,19) AND receiver_x IS NOT NULL
+                THEN SQRT(POWER(receiver_x-thrower_x,2)+POWER(receiver_y-thrower_y,2)) END)::numeric, 1) AS avg_throw_dist,
+            ROUND(AVG(CASE WHEN event_type IN (18,19) AND receiver_y IS NOT NULL
+                THEN receiver_y - thrower_y END)::numeric, 1) AS avg_throw_depth
+        FROM events
+        WHERE thrower = %s AND event_type IN (18,19,20,22) {yf_plain}
+        GROUP BY year, team ORDER BY year
+    """, yp1)
+    throw_rows: Dict[int, Any] = {}
+    for r in cur.fetchall():
+        yr = r["year"]
+        # If player was on multiple teams in a year, keep the one with more throws
+        if yr not in throw_rows or (r.get("throw_attempts") or 0) > (throw_rows[yr].get("throw_attempts") or 0):
+            throw_rows[yr] = dict(r)
+
+    # Per-season catching stats
+    cur.execute(f"""
+        SELECT year,
+            COUNT(*) AS catches,
+            COUNT(*) FILTER (WHERE event_type = 19) AS goals_caught
+        FROM events
+        WHERE receiver = %s AND event_type IN (18,19) {yf_plain}
+        GROUP BY year ORDER BY year
+    """, yp1)
+    catch_rows = {r["year"]: dict(r) for r in cur.fetchall()}
+
+    # Per-season possessions (O-line + D-line)
+    cur.execute(f"""
+        SELECT e.year,
+            COUNT(DISTINCT lp.event_id) FILTER (WHERE lp.line_type = 'O') AS o_possessions,
+            COUNT(DISTINCT lp.event_id) FILTER (WHERE lp.line_type = 'D') AS d_possessions
+        FROM line_players lp
+        JOIN events e ON e.event_id = lp.event_id
+        WHERE lp.player_id = %s {yf_e}
+        GROUP BY e.year ORDER BY e.year
+    """, yp1)
+    poss_rows = {r["year"]: dict(r) for r in cur.fetchall()}
+
+    # Per-season O-hold rate
+    cur.execute(f"""
+        WITH o_starts AS (
+            SELECT e.event_id, e.game_id, e.event_number, e.team, e.year
+            FROM events e
+            JOIN line_players lp ON lp.event_id = e.event_id
+                AND lp.line_type = 'O' AND lp.player_id = %s
+            WHERE e.event_type = 2 {yf_e}
+        ),
+        outcomes AS (
+            SELECT os.event_id, os.year,
+                COALESCE(BOOL_OR(e2.event_type = 19 AND e2.team = os.team), FALSE) AS scored
+            FROM o_starts os
+            LEFT JOIN events e2 ON e2.game_id = os.game_id
+                AND e2.event_number > os.event_number
+                AND e2.event_number < COALESCE(
+                    (SELECT MIN(e3.event_number) FROM events e3
+                     WHERE e3.game_id = os.game_id AND e3.event_type = 1
+                       AND e3.event_number > os.event_number),
+                    9999999
+                )
+            GROUP BY os.event_id, os.year
+        )
+        SELECT year,
+            ROUND(AVG(CASE WHEN scored THEN 1.0 ELSE 0.0 END)::numeric, 4) AS o_hold_rate
+        FROM outcomes
+        GROUP BY year ORDER BY year
+    """, yp1)
+    hold_rows = {r["year"]: float(r["o_hold_rate"] or 0) for r in cur.fetchall()}
+
+    # Merge per-season data
+    all_years = sorted(set(list(throw_rows.keys()) + list(catch_rows.keys()) + list(poss_rows.keys())))
+    seasons = []
+    for yr in all_years:
+        t = throw_rows.get(yr, {})
+        c = catch_rows.get(yr, {})
+        p = poss_rows.get(yr, {})
+        ta = int(t.get("throw_attempts") or 0)
+        comp = int(t.get("completions") or 0)
+        ha = int(t.get("huck_attempts") or 0)
+        hc = int(t.get("huck_completions") or 0)
+        seasons.append({
+            "year": yr,
+            "team": t.get("team") or "",
+            "o_possessions": int(p.get("o_possessions") or 0),
+            "d_possessions": int(p.get("d_possessions") or 0),
+            "throw_attempts": ta,
+            "completions": comp,
+            "completion_pct": round(comp / ta, 4) if ta > 0 else 0.0,
+            "assists": int(t.get("assists") or 0),
+            "goals": int(c.get("goals_caught") or 0),
+            "turnovers": int(t.get("turnovers") or 0),
+            "huck_attempts": ha,
+            "huck_completions": hc,
+            "huck_pct": round(hc / ha, 4) if ha > 0 else 0.0,
+            "avg_throw_dist": float(t.get("avg_throw_dist") or 0),
+            "avg_throw_depth": float(t.get("avg_throw_depth") or 0),
+            "catches": int(c.get("catches") or 0),
+            "o_hold_rate": hold_rows.get(yr, 0.0),
+        })
+
+    # Career totals
+    total_ta = sum(s["throw_attempts"] for s in seasons)
+    total_comp = sum(s["completions"] for s in seasons)
+    total_ha = sum(s["huck_attempts"] for s in seasons)
+    total_hc = sum(s["huck_completions"] for s in seasons)
+    total_opp = sum(s["o_possessions"] for s in seasons)
+    weighted_dist = sum(s["avg_throw_dist"] * s["completions"] for s in seasons if s["completions"] > 0)
+    weighted_depth = sum(s["avg_throw_depth"] * s["completions"] for s in seasons if s["completions"] > 0)
+    weighted_hold = sum(s["o_hold_rate"] * s["o_possessions"] for s in seasons if s["o_possessions"] > 0)
+    career = {
+        "year": 0,
+        "team": "Career",
+        "o_possessions": total_opp,
+        "d_possessions": sum(s["d_possessions"] for s in seasons),
+        "throw_attempts": total_ta,
+        "completions": total_comp,
+        "completion_pct": round(total_comp / total_ta, 4) if total_ta > 0 else 0.0,
+        "assists": sum(s["assists"] for s in seasons),
+        "goals": sum(s["goals"] for s in seasons),
+        "turnovers": sum(s["turnovers"] for s in seasons),
+        "huck_attempts": total_ha,
+        "huck_completions": total_hc,
+        "huck_pct": round(total_hc / total_ha, 4) if total_ha > 0 else 0.0,
+        "avg_throw_dist": round(weighted_dist / total_comp, 1) if total_comp > 0 else 0.0,
+        "avg_throw_depth": round(weighted_depth / total_comp, 1) if total_comp > 0 else 0.0,
+        "catches": sum(s["catches"] for s in seasons),
+        "o_hold_rate": round(weighted_hold / total_opp, 4) if total_opp > 0 else 0.0,
+    }
+
+    # Top 5 targets (who this player throws to most)
+    cur.execute(f"""
+        SELECT e.receiver AS player_id, COALESCE(p.full_name, e.receiver) AS name,
+            COUNT(*) AS count,
+            ROUND(SUM(CASE WHEN e.event_type IN (18,19) THEN 1.0 ELSE 0.0 END) / COUNT(*), 3) AS completion_pct
+        FROM events e
+        LEFT JOIN players p ON p.player_id = e.receiver
+        WHERE e.thrower = %s AND e.event_type IN (18,19,20) AND e.receiver IS NOT NULL {yf_plain}
+        GROUP BY e.receiver, p.full_name
+        ORDER BY count DESC LIMIT 5
+    """, yp1)
+    top_targets = [
+        {"id": r["player_id"], "name": r["name"], "count": int(r["count"]), "completion_pct": float(r["completion_pct"])}
+        for r in cur.fetchall()
+    ]
+
+    # Top 5 throwers (who throws to this player most)
+    cur.execute(f"""
+        SELECT e.thrower AS player_id, COALESCE(p.full_name, e.thrower) AS name,
+            COUNT(*) AS count,
+            ROUND(SUM(CASE WHEN e.event_type IN (18,19) THEN 1.0 ELSE 0.0 END) / COUNT(*), 3) AS completion_pct
+        FROM events e
+        LEFT JOIN players p ON p.player_id = e.thrower
+        WHERE e.receiver = %s AND e.event_type IN (18,19,20) {yf_plain}
+        GROUP BY e.thrower, p.full_name
+        ORDER BY count DESC LIMIT 5
+    """, yp1)
+    top_throwers = [
+        {"id": r["player_id"], "name": r["name"], "count": int(r["count"]), "completion_pct": float(r["completion_pct"])}
+        for r in cur.fetchall()
+    ]
+
+    # Top synergy partners (all-time; top 10 by shared possessions → top 5 by delta)
+    cur.execute("""
+        SELECT lp2.player_id AS teammate_id, COALESCE(p.full_name, lp2.player_id) AS name,
+            COUNT(DISTINCT lp2.event_id) AS shared_possessions
+        FROM line_players lp1
+        JOIN line_players lp2 ON lp2.event_id = lp1.event_id
+            AND lp2.line_type = 'O' AND lp2.player_id != %s
+        LEFT JOIN players p ON p.player_id = lp2.player_id
+        WHERE lp1.player_id = %s AND lp1.line_type = 'O'
+        GROUP BY lp2.player_id, p.full_name
+        HAVING COUNT(DISTINCT lp2.event_id) >= 10
+        ORDER BY shared_possessions DESC
+        LIMIT 10
+    """, (player_id, player_id))
+    top_teammates = cur.fetchall()
+
+    player_rate = _scoring_rate_for_player(cur, player_id)
+    synergy_partners = []
+    for tm in top_teammates:
+        teammate_id = tm["teammate_id"]
+        shared, combined_rate = _combined_scoring_rate_for_pair(cur, player_id, teammate_id)
+        teammate_rate = _scoring_rate_for_player(cur, teammate_id)
+        delta = round(combined_rate - (player_rate + teammate_rate) / 2, 4)
+        synergy_partners.append({
+            "id": teammate_id,
+            "name": tm["name"],
+            "shared_possessions": shared,
+            "combined_rate": combined_rate,
+            "synergy_delta": delta,
+        })
+    synergy_partners.sort(key=lambda x: x["synergy_delta"], reverse=True)
+    synergy_partners = synergy_partners[:5]
+
+    cur.close()
+    conn.close()
+
+    return {
+        "player": {"id": player_id, "name": player_name},
+        "available_years": available_years,
+        "seasons": seasons,
+        "career": career,
+        "top_targets": top_targets,
+        "top_throwers": top_throwers,
+        "synergy_partners": synergy_partners,
+    }
+
+
+@app.get("/player/{player_id}/throw-tendencies")
+def get_player_throw_tendencies(player_id: str, year: Optional[int] = None):
+    """Throw direction tendencies for a player, binned into 16 compass sectors."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    yf = "AND year = %s" if year else ""
+    params = (player_id, year) if year else (player_id,)
+
+    cur.execute(f"""
+        SELECT
+            receiver_x - thrower_x AS dx,
+            receiver_y - thrower_y AS dy,
+            SQRT(POWER(receiver_x - thrower_x, 2) + POWER(receiver_y - thrower_y, 2)) AS dist
+        FROM events
+        WHERE thrower = %s
+          AND event_type IN (18, 19)
+          AND thrower_x IS NOT NULL AND thrower_y IS NOT NULL
+          AND receiver_x IS NOT NULL AND receiver_y IS NOT NULL
+          {yf}
+    """, params)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return {"bins": [], "total_throws": 0, "max_avg_dist": 0.0}
+
+    N_BINS = 16
+    BIN_DEG = 360.0 / N_BINS
+
+    bins_count = [0] * N_BINS
+    bins_dist_sum = [0.0] * N_BINS
+
+    for row in rows:
+        dx, dy, dist = float(row["dx"]), float(row["dy"]), float(row["dist"])
+        if dist < 1.0:
+            continue
+        # atan2(dx, dy): 0 = forward/upfield, clockwise positive; result in [-π, π]
+        angle_deg = float(np.degrees(np.arctan2(dx, dy))) % 360.0
+        bin_idx = int(angle_deg / BIN_DEG) % N_BINS
+        bins_count[bin_idx] += 1
+        bins_dist_sum[bin_idx] += dist
+
+    total = sum(bins_count)
+    max_avg_dist = 0.0
+    result_bins = []
+    for i in range(N_BINS):
+        cnt = bins_count[i]
+        avg_dist = bins_dist_sum[i] / cnt if cnt > 0 else 0.0
+        max_avg_dist = max(max_avg_dist, avg_dist)
+        result_bins.append({
+            "angle_deg": round(i * BIN_DEG, 2),
+            "count": cnt,
+            "pct": round(cnt / total, 4) if total > 0 else 0.0,
+            "avg_dist": round(avg_dist, 1),
+        })
+
+    return {
+        "bins": result_bins,
+        "total_throws": total,
+        "max_avg_dist": round(max_avg_dist, 1),
     }
 
 

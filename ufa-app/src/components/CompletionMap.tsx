@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { api, CompletionHeatmapResponse } from '../api/client'
+import { api, CompletionHeatmapResponse, PlayerOption } from '../api/client'
 
 const CANVAS_WIDTH = 900
 const CANVAS_HEIGHT = 400
@@ -121,9 +121,12 @@ type ClickState = 'idle' | 'origin_set'
 
 function CompletionMap() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const searchRef = useRef<HTMLDivElement>(null)
 
-  const [throwers, setThrowers] = useState<string[]>([])
+  const [throwers, setThrowers] = useState<PlayerOption[]>([])
   const [selectedThrower, setSelectedThrower] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [showDropdown, setShowDropdown] = useState(false)
 
   const [clickState, setClickState] = useState<ClickState>('idle')
   const [origin, setOrigin] = useState<[number, number] | null>(null)    // [fieldX, fieldY]
@@ -141,9 +144,21 @@ function CompletionMap() {
     api.getCompletionThrowers()
       .then(list => {
         setThrowers(list)
-        if (list.length > 0) setSelectedThrower(list[0])
+        if (list.length > 0) {
+          setSelectedThrower(list[0].id)
+          setSearchQuery(list[0].name)
+        }
       })
       .catch(() => {})
+  }, [])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) setShowDropdown(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
   }, [])
 
   // Draw everything on canvas
@@ -158,19 +173,19 @@ function CompletionMap() {
     // Draw heatmap pixels
     if (heatmap) {
       const grid = heatmap.grid  // 60 rows × 25 cols
-      const nRows = grid.length      // 60 (y axis, 0→120)
-      const nCols = grid[0].length   // 25 (x axis, -25→25)
-      const cellW = fieldWidth / nCols
-      const cellH = fieldHeight / nRows
+      const nRows = grid.length      // 60 (fieldY axis → canvas X, left→right)
+      const nCols = grid[0].length   // 25 (fieldX axis → canvas Y, top→bottom)
+      const cellW = fieldWidth / nRows   // canvas X spans nRows (fieldY)
+      const cellH = fieldHeight / nCols  // canvas Y spans nCols (fieldX)
       const imgData = ctx.createImageData(Math.ceil(fieldWidth), Math.ceil(fieldHeight))
 
       for (let row = 0; row < nRows; row++) {
         for (let col = 0; col < nCols; col++) {
           const val = grid[row][col]
           const [r, g, b, a] = completionColor(val)
-          // row=0 → fieldY=0 → left of canvas; row=nRows-1 → fieldY=120 → right
-          const px = Math.floor(col * cellW)
-          const py = Math.floor(row * cellH)
+          // row = fieldY index → canvas X; col = fieldX index → canvas Y
+          const px = Math.floor(row * cellW)
+          const py = Math.floor(col * cellH)
           const pw = Math.ceil(cellW)
           const ph = Math.ceil(cellH)
           for (let dy = 0; dy < ph; dy++) {
@@ -361,8 +376,10 @@ function CompletionMap() {
     setHoverField(null)
   }, [])
 
-  const handleThrowerChange = useCallback((name: string) => {
-    setSelectedThrower(name)
+  const handleThrowerChange = useCallback((t: PlayerOption) => {
+    setSelectedThrower(t.id)
+    setSearchQuery(t.name)
+    setShowDropdown(false)
     handleReset()
   }, [handleReset])
 
@@ -377,16 +394,45 @@ function CompletionMap() {
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px' }}>
       {/* Controls */}
       <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
-        <label style={{ color: '#ccc', fontSize: '14px' }}>
-          Thrower:&nbsp;
-          <select
-            value={selectedThrower}
-            onChange={e => handleThrowerChange(e.target.value)}
-            style={{ background: '#2a2a3e', color: 'white', border: '1px solid #555', borderRadius: '6px', padding: '4px 8px', fontSize: '13px' }}
-          >
-            {throwers.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </label>
+        <div ref={searchRef} style={{ position: 'relative' }}>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => { setSearchQuery(e.target.value); setShowDropdown(true) }}
+            onFocus={() => setShowDropdown(true)}
+            placeholder="Search thrower..."
+            style={{
+              width: '200px', padding: '5px 10px', fontSize: '13px', borderRadius: '6px',
+              border: '1px solid #555', backgroundColor: '#2a2a3e', color: 'white', outline: 'none',
+            }}
+          />
+          {showDropdown && (
+            <div style={{
+              position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+              maxHeight: '200px', overflowY: 'auto',
+              backgroundColor: '#1e1e2e', border: '1px solid #444', borderRadius: '6px', zIndex: 100,
+            }}>
+              {throwers
+                .filter(t => t.name.toLowerCase().includes(searchQuery.toLowerCase()))
+                .slice(0, 20)
+                .map(t => (
+                  <div
+                    key={t.id}
+                    onClick={() => handleThrowerChange(t)}
+                    style={{
+                      padding: '6px 12px', cursor: 'pointer', fontSize: '13px',
+                      color: t.id === selectedThrower ? '#22d3ee' : '#ccc',
+                      backgroundColor: t.id === selectedThrower ? '#2a2a3e' : 'transparent',
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#2a2a3e')}
+                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = t.id === selectedThrower ? '#2a2a3e' : 'transparent')}
+                  >
+                    {t.name}
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
 
         <span style={{ color: '#22d3ee', fontSize: '13px' }}>{instruction}</span>
 

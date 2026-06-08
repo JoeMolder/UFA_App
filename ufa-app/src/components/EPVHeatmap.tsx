@@ -32,7 +32,6 @@ function EPVHeatmap() {
   const [teams, setTeams] = useState<string[]>([])
   const [selectedTeam, setSelectedTeam] = useState(ALL_TEAMS)
   const [throwIdx, setThrowIdx] = useState(1)
-  const [modelType, setModelType] = useState<'xgb' | 'nn'>('xgb')
   const [quarter, setQuarter] = useState<number | null>(null)
 
   const CANVAS_WIDTH = 900
@@ -81,7 +80,7 @@ function EPVHeatmap() {
         setLoading(true)
         setError(null)
         const team = selectedTeam === ALL_TEAMS ? undefined : selectedTeam
-        const result = await api.getEPVHeatmap(throwIdx, team, modelType, quarter ?? undefined)
+        const result = await api.getEPVHeatmap(throwIdx, team, 'nn', quarter ?? undefined)
         if (!cancelled) {
           setData(result)
           setLoading(false)
@@ -101,7 +100,7 @@ function EPVHeatmap() {
     }
     fetchData()
     return () => { cancelled = true }
-  }, [throwIdx, selectedTeam, modelType, quarter])
+  }, [throwIdx, selectedTeam, quarter])
 
   // Draw heatmap
   useEffect(() => {
@@ -361,30 +360,6 @@ function EPVHeatmap() {
           </div>
         </div>
 
-        {/* Model toggle */}
-        <div>
-          <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: '#ccc' }}>Model</label>
-          <div style={{ display: 'flex', gap: '0' }}>
-            {(['xgb', 'nn'] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => setModelType(m)}
-                style={{
-                  padding: '6px 14px',
-                  fontSize: '13px',
-                  border: '1px solid #555',
-                  cursor: 'pointer',
-                  backgroundColor: modelType === m ? '#f97316' : '#2a2a3e',
-                  color: modelType === m ? 'white' : '#aaa',
-                  borderRadius: m === 'xgb' ? '4px 0 0 4px' : '0 4px 4px 0',
-                  transition: 'all 0.15s',
-                }}
-              >
-                {m === 'xgb' ? 'XGBoost' : 'Neural Net'}
-              </button>
-            ))}
-          </div>
-        </div>
       </div>
 
       {/* Canvas */}

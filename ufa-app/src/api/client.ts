@@ -165,6 +165,7 @@ export interface EmbeddingsResponse {
   clusters: number[];
   player_stats: Record<string, PlayerStats>;
   cluster_summaries: Record<string, ClusterSummary>;
+  name_map: Record<string, string>;
 }
 
 export interface EPVResponse {
@@ -223,6 +224,13 @@ export interface TeamPlayer {
   possessions: number;
 }
 
+export interface RosterPlayer {
+  id: string;
+  name: string;
+  o_appearances: number;
+  d_appearances: number;
+}
+
 export interface TeamResponse {
   team_id: string;
   team_name: string;
@@ -232,12 +240,71 @@ export interface TeamResponse {
   record: { wins: number; losses: number; games: number };
   o_line_rate: number;
   top_players: TeamPlayer[];
+  roster: RosterPlayer[];
   top_synergies: TeamSynergyPair[];
 }
 
 export interface CompletionPredictResponse {
   probability: number;
   thrower: string;
+}
+
+export interface PlayerSeason {
+  year: number;
+  team: string;
+  o_possessions: number;
+  d_possessions: number;
+  throw_attempts: number;
+  completions: number;
+  completion_pct: number;
+  assists: number;
+  goals: number;
+  turnovers: number;
+  huck_attempts: number;
+  huck_completions: number;
+  huck_pct: number;
+  avg_throw_dist: number;
+  avg_throw_depth: number;
+  catches: number;
+  o_hold_rate: number;
+}
+
+export interface PlayerConnection {
+  id: string;
+  name: string;
+  count: number;
+  completion_pct: number;
+}
+
+export interface PlayerSynergyPartner {
+  id: string;
+  name: string;
+  shared_possessions: number;
+  combined_rate: number;
+  synergy_delta: number;
+}
+
+export interface PlayerResponse {
+  player: PlayerOption;
+  available_years: number[];
+  seasons: PlayerSeason[];
+  career: PlayerSeason;
+  top_targets: PlayerConnection[];
+  top_throwers: PlayerConnection[];
+  synergy_partners: PlayerSynergyPartner[];
+}
+
+export interface ThrowTendencyBin {
+  angle_deg: number;
+  count: number;
+  pct: number;
+  avg_dist: number;
+}
+
+export interface ThrowTendencies {
+  bins: ThrowTendencyBin[];
+  total_throws: number;
+  max_avg_dist: number;
 }
 
 // API Functions
@@ -269,8 +336,8 @@ export const api = {
   },
 
   // Get player list for predictions
-  getPlayers: async (): Promise<string[]> => {
-    const response = await apiClient.get<string[]>('/players');
+  getPlayers: async (): Promise<PlayerOption[]> => {
+    const response = await apiClient.get<PlayerOption[]>('/players');
     return response.data;
   },
 
@@ -448,8 +515,8 @@ export const api = {
   },
 
   // Get list of throwers in the completion model
-  getCompletionThrowers: async (): Promise<string[]> => {
-    const response = await apiClient.get<string[]>('/completion/throwers');
+  getCompletionThrowers: async (): Promise<PlayerOption[]> => {
+    const response = await apiClient.get<PlayerOption[]>('/completion/throwers');
     return response.data;
   },
 
@@ -520,6 +587,22 @@ export const api = {
     const params: Record<string, number> = {};
     if (year) params.year = year;
     const response = await apiClient.get<TeamResponse>(`/team/${teamId}`, { params });
+    return response.data;
+  },
+
+  // Get player page data
+  getPlayer: async (playerId: string, year?: number): Promise<PlayerResponse> => {
+    const params: Record<string, number> = {};
+    if (year) params.year = year;
+    const response = await apiClient.get<PlayerResponse>(`/player/${playerId}`, { params });
+    return response.data;
+  },
+
+  // Get throw direction tendencies for a player
+  getPlayerThrowTendencies: async (playerId: string, year?: number): Promise<ThrowTendencies> => {
+    const params: Record<string, number> = {};
+    if (year) params.year = year;
+    const response = await apiClient.get<ThrowTendencies>(`/player/${playerId}/throw-tendencies`, { params });
     return response.data;
   },
 };

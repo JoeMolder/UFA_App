@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api, TeamResponse } from '../api/client'
+
 
 function TeamPage() {
   const { teamId } = useParams<{ teamId: string }>()
@@ -9,22 +10,35 @@ function TeamPage() {
   const [selectedYear, setSelectedYear] = useState<number | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const hasInitialized = useRef(false)
 
   useEffect(() => {
     if (!teamId) return
+    let cancelled = false
     const fetchTeam = async () => {
       try {
         setLoading(true)
         setError(null)
         const data = await api.getTeam(teamId, selectedYear)
-        setTeam(data)
+        if (cancelled) return
+
+        if (!hasInitialized.current && data.available_years.length > 0) {
+          // First load: silently redirect to most recent year, keep spinner up
+          hasInitialized.current = true
+          setSelectedYear(data.available_years[data.available_years.length - 1])
+        } else {
+          setTeam(data)
+          setLoading(false)
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to fetch team data')
-      } finally {
-        setLoading(false)
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to fetch team data')
+          setLoading(false)
+        }
       }
     }
     fetchTeam()
+    return () => { cancelled = true }
   }, [teamId, selectedYear])
 
   const synergyColor = (delta: number) => {
@@ -99,7 +113,7 @@ function TeamPage() {
         ))}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginBottom: '32px' }}>
         {/* Top Players */}
         <div>
           <h2 style={{ marginBottom: '12px' }}>Top Players by Hold Rate</h2>
@@ -117,7 +131,10 @@ function TeamPage() {
               <tbody>
                 {team.top_players.map((p) => (
                   <tr key={p.id} style={{ borderBottom: '1px solid #333' }}>
-                    <td style={{ padding: '8px 0' }}>{p.name}</td>
+                    <td
+                      style={{ padding: '8px 0', cursor: 'pointer', color: '#60a5fa' }}
+                      onClick={() => navigate(`/player/${p.id}`)}
+                    >{p.name}</td>
                     <td style={{ textAlign: 'right', padding: '8px 0', fontWeight: 600 }}>
                       {(p.hold_rate * 100).toFixed(1)}%
                     </td>
@@ -168,6 +185,57 @@ function TeamPage() {
             </table>
           )}
         </div>
+      </div>
+
+      {/* Roster */}
+      <div>
+        <h2 style={{ marginBottom: '12px' }}>
+          Roster{selectedYear ? ` — ${selectedYear}` : ' — All-time'}
+        </h2>
+        {team.roster.length === 0 ? (
+          <p style={{ color: '#888', fontSize: '14px' }}>No roster data for this season.</p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #444', color: '#aaa' }}>
+                <th style={{ textAlign: 'left', paddingBottom: '8px' }}>Player</th>
+                <th style={{ textAlign: 'center', paddingBottom: '8px', width: '60px' }}>Line</th>
+                <th style={{ textAlign: 'right', paddingBottom: '8px' }}>O poss</th>
+                <th style={{ textAlign: 'right', paddingBottom: '8px' }}>D poss</th>
+              </tr>
+            </thead>
+            <tbody>
+              {team.roster.map((p) => {
+                const primaryLine = p.o_appearances >= p.d_appearances ? 'O' : 'D'
+                return (
+                  <tr key={p.id} style={{ borderBottom: '1px solid #2a2a3e' }}>
+                    <td
+                      style={{ padding: '7px 0', cursor: 'pointer', color: '#60a5fa' }}
+                      onClick={() => navigate(`/player/${p.id}`)}
+                    >
+                      {p.name}
+                    </td>
+                    <td style={{ textAlign: 'center', padding: '7px 0' }}>
+                      <span style={{
+                        display: 'inline-block',
+                        padding: '1px 7px',
+                        borderRadius: '4px',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        backgroundColor: primaryLine === 'O' ? 'rgba(99,102,241,0.2)' : 'rgba(239,68,68,0.2)',
+                        color: primaryLine === 'O' ? '#818cf8' : '#f87171',
+                      }}>
+                        {primaryLine}
+                      </span>
+                    </td>
+                    <td style={{ textAlign: 'right', padding: '7px 0', color: '#aaa' }}>{p.o_appearances}</td>
+                    <td style={{ textAlign: 'right', padding: '7px 0', color: '#aaa' }}>{p.d_appearances}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   )
