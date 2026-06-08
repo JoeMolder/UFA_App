@@ -299,7 +299,8 @@ try:
     completion_nn_save = joblib.load(COMPLETION_NN_PATH)
     cfg = completion_nn_save["model_config"]
     _completion_nn = CompletionNet(**cfg)
-    _completion_nn.load_state_dict(completion_nn_save["model_state"])
+    state = {k: v.cpu() if hasattr(v, 'cpu') else v for k, v in completion_nn_save["model_state"].items()}
+    _completion_nn.load_state_dict(state)
     _completion_nn.eval()
     _completion_thrower_encoder = completion_nn_save["encoder"]
     _completion_scaler = completion_nn_save["scaler"]

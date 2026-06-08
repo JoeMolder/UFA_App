@@ -12,5 +12,6 @@ joblib
 numpy
 scikit-learn
 xgboost
+lightgbm
 umap-learn
 hdbscan
