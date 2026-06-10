@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from typing import List, Dict, Any, Optional
@@ -22,6 +23,7 @@ for _url in (os.getenv("FRONTEND_URL", ""), os.getenv("FRONTEND_URL_WWW", "")):
     if _url:
         _cors_origins.append(_url)
 
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
