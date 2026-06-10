@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { api, PlayerResponse, PlayerSeason, ThrowTendencies } from '../api/client'
+import { api, PlayerResponse, PlayerSeason, ThrowTendencies, BlockTypes } from '../api/client'
 import { ThrowTendencyChart } from '../components/ThrowTendencyChart'
 import { teamLabel } from '../utils'
 
@@ -32,6 +32,7 @@ function StatsTable({ rows, career }: { rows: PlayerSeason[]; career: PlayerSeas
     { key: 'goals', label: 'Gls', fmt: (s: PlayerSeason) => String(s.goals), bold: false },
     { key: 'catches', label: 'Catches', fmt: (s: PlayerSeason) => String(s.catches), bold: false },
     { key: 'turnovers', label: 'TO', fmt: (s: PlayerSeason) => String(s.turnovers), bold: false },
+    { key: 'blocks', label: 'Blks', fmt: (s: PlayerSeason) => String(s.blocks), bold: false },
     { key: 'huck_attempts', label: 'Hucks', fmt: (s: PlayerSeason) => String(s.huck_attempts), bold: false },
     { key: 'huck_pct', label: 'Huck%', fmt: (s: PlayerSeason) => s.huck_attempts > 0 ? pct(s.huck_pct) : '—', bold: true },
     { key: 'avg_throw_dist', label: 'Avg Dist', fmt: (s: PlayerSeason) => dist(s.avg_throw_dist), bold: false },
@@ -82,11 +83,42 @@ function StatsTable({ rows, career }: { rows: PlayerSeason[]; career: PlayerSeas
   )
 }
 
+function BlockTypeChart({ huck, short, reset, total }: BlockTypes) {
+  if (total === 0) return null
+  const bars = [
+    { label: 'Huck', count: huck, color: '#8b5cf6' },
+    { label: 'Short', count: short, color: '#3b82f6' },
+    { label: 'Reset', count: reset, color: '#10b981' },
+  ]
+  const maxCount = Math.max(...bars.map(b => b.count), 1)
+  const barH = 120
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-end', gap: '16px', height: `${barH + 56}px` }}>
+      {bars.map(b => (
+        <div key={b.label} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '64px' }}>
+          <span style={{ fontSize: '12px', color: '#e2e8f0', marginBottom: '4px' }}>{b.count}</span>
+          <div style={{
+            width: '100%',
+            height: `${Math.max(Math.round((b.count / maxCount) * barH), b.count > 0 ? 4 : 0)}px`,
+            backgroundColor: b.color,
+            borderRadius: '3px 3px 0 0',
+          }} />
+          <span style={{ fontSize: '12px', color: '#aaa', marginTop: '6px' }}>{b.label}</span>
+          <span style={{ fontSize: '11px', color: '#666' }}>
+            {(b.count / total * 100).toFixed(0)}%
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function PlayerPage() {
   const { playerId } = useParams<{ playerId: string }>()
   const navigate = useNavigate()
   const [player, setPlayer] = useState<PlayerResponse | null>(null)
   const [tendencies, setTendencies] = useState<ThrowTendencies | null>(null)
+  const [blockTypes, setBlockTypes] = useState<BlockTypes | null>(null)
   const [selectedYear, setSelectedYear] = useState<number | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -97,12 +129,14 @@ function PlayerPage() {
       try {
         setLoading(true)
         setError(null)
-        const [data, tend] = await Promise.all([
+        const [data, tend, blkTypes] = await Promise.all([
           api.getPlayer(playerId, selectedYear),
           api.getPlayerThrowTendencies(playerId, selectedYear),
+          api.getPlayerBlockTypes(playerId, selectedYear),
         ])
         setPlayer(data)
         setTendencies(tend)
+        setBlockTypes(blkTypes)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to fetch player data')
       } finally {
@@ -158,18 +192,31 @@ function PlayerPage() {
         )}
       </div>
 
-      {/* Throw tendency chart */}
-      {tendencies && tendencies.total_throws > 0 && (
-        <div style={{ marginBottom: '32px' }}>
-          <h2 style={{ marginBottom: '4px' }}>Throw Tendencies</h2>
-          <p style={{ color: '#888', fontSize: '12px', marginBottom: '16px' }}>
-            Sector length = avg distance · color = frequency (blue → purple)
-          </p>
-          <ThrowTendencyChart
-            bins={tendencies.bins}
-            totalThrows={tendencies.total_throws}
-            maxAvgDist={tendencies.max_avg_dist}
-          />
+      {/* Throw tendencies + block types */}
+      {((tendencies && tendencies.total_throws > 0) || (blockTypes && blockTypes.total > 0)) && (
+        <div style={{ marginBottom: '32px', display: 'flex', gap: '48px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          {tendencies && tendencies.total_throws > 0 && (
+            <div>
+              <h2 style={{ marginBottom: '4px' }}>Throw Tendencies</h2>
+              <p style={{ color: '#888', fontSize: '12px', marginBottom: '16px' }}>
+                Sector length = avg distance · color = frequency (blue → purple)
+              </p>
+              <ThrowTendencyChart
+                bins={tendencies.bins}
+                totalThrows={tendencies.total_throws}
+                maxAvgDist={tendencies.max_avg_dist}
+              />
+            </div>
+          )}
+          {blockTypes && blockTypes.total > 0 && (
+            <div>
+              <h2 style={{ marginBottom: '4px' }}>Block Types</h2>
+              <p style={{ color: '#888', fontSize: '12px', marginBottom: '16px' }}>
+                Based on the throw preceding each block · {blockTypes.total} blocks
+              </p>
+              <BlockTypeChart {...blockTypes} />
+            </div>
+          )}
         </div>
       )}
 

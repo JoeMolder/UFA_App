@@ -266,6 +266,7 @@ export interface PlayerSeason {
   avg_throw_dist: number;
   avg_throw_depth: number;
   catches: number;
+  blocks: number;
   o_hold_rate: number;
 }
 
@@ -305,6 +306,13 @@ export interface ThrowTendencies {
   bins: ThrowTendencyBin[];
   total_throws: number;
   max_avg_dist: number;
+}
+
+export interface BlockTypes {
+  huck: number;
+  short: number;
+  reset: number;
+  total: number;
 }
 
 // API Functions
@@ -603,6 +611,13 @@ export const api = {
     const params: Record<string, number> = {};
     if (year) params.year = year;
     const response = await apiClient.get<ThrowTendencies>(`/player/${playerId}/throw-tendencies`, { params });
+    return response.data;
+  },
+
+  getPlayerBlockTypes: async (playerId: string, year?: number): Promise<BlockTypes> => {
+    const params: Record<string, number> = {};
+    if (year) params.year = year;
+    const response = await apiClient.get<BlockTypes>(`/player/${playerId}/block-types`, { params });
     return response.data;
   },
 };

@@ -6,14 +6,9 @@ from typing import List, Dict, Any, Optional
 import os
 from dotenv import load_dotenv
 import numpy as np
-import torch
-import torch.nn as nn
 import joblib
 from pathlib import Path
 from scipy.ndimage import gaussian_filter
-
-from nflows import flows, distributions, transforms
-import umap
 
 
 # Load environment variables from .env file
@@ -66,90 +61,7 @@ def get_db_connection():
 # ML Model Loading
 # ---------------------------------------------------------------------------
 
-class ContextNetwork(nn.Module):
-    """Processes context (player + position) before feeding to flow."""
-    def __init__(self, n_players, embedding_dim=16, hidden_dim=64, output_dim=32):
-        super().__init__()
-        self.player_embedding = nn.Embedding(n_players, embedding_dim)
-        input_dim = embedding_dim + 2
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim),
-        )
-
-    def forward(self, context):
-        player_ids = context[:, 0].long()
-        position = context[:, 1:3]
-        player_emb = self.player_embedding(player_ids)
-        combined = torch.cat([player_emb, position], dim=1)
-        return self.network(combined)
-
-
-class TurnoverContextNetwork(nn.Module):
-    """Processes thrower position context (no player embedding)."""
-    def __init__(self, hidden_dim=64, output_dim=32):
-        super().__init__()
-        self.network = nn.Sequential(
-            nn.Linear(2, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim),
-        )
-
-    def forward(self, context):
-        return self.network(context)
-
-
-def create_turnover_flow(num_layers=5, hidden_features=128, context_features=32):
-    """Recreate turnover flow architecture for loading weights."""
-    base_dist = distributions.StandardNormal(shape=[2])
-    context_net = TurnoverContextNetwork(hidden_dim=64, output_dim=context_features)
-    transform_list = []
-    for _ in range(num_layers):
-        transform_list.append(
-            transforms.MaskedAffineAutoregressiveTransform(
-                features=2,
-                hidden_features=hidden_features,
-                context_features=context_features,
-                num_blocks=2,
-            )
-        )
-        transform_list.append(transforms.ReversePermutation(features=2))
-    transform = transforms.CompositeTransform(transform_list)
-    flow = flows.Flow(transform, base_dist)
-    return flow, context_net
-
-
-def create_flow(n_players, num_layers=5, hidden_features=128, context_features=32):
-    """Recreate flow architecture for loading weights."""
-    base_dist = distributions.StandardNormal(shape=[2])
-    context_net = ContextNetwork(
-        n_players=n_players,
-        embedding_dim=16,
-        hidden_dim=64,
-        output_dim=context_features,
-    )
-    transform_list = []
-    for _ in range(num_layers):
-        transform_list.append(
-            transforms.MaskedAffineAutoregressiveTransform(
-                features=2,
-                hidden_features=hidden_features,
-                context_features=context_features,
-                num_blocks=2,
-            )
-        )
-        transform_list.append(transforms.ReversePermutation(features=2))
-    transform = transforms.CompositeTransform(transform_list)
-    flow = flows.Flow(transform, base_dist)
-    return flow, context_net
-
-
-# Load model at startup
+# Throw flow model — lazy-loaded on first cache miss
 MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "normalizing_flow_model.pkl"
 
 _flow = None
@@ -158,117 +70,211 @@ _player_encoder = None
 _player_names: List[str] = []
 _umap_coordinates: np.ndarray | None = None
 _cluster_labels: np.ndarray | None = None
+_flow_load_attempted = False
 
+def _ensure_flow_loaded():
+    """Load the throw flow model on first use (lazy). Returns True if model is available."""
+    global _flow, _context_net, _player_encoder, _player_names, _flow_load_attempted
+    if _flow is not None:
+        return True
+    if _flow_load_attempted:
+        return False
+    _flow_load_attempted = True
+    try:
+        import torch
+        import torch.nn as nn
+        from nflows import flows, distributions, transforms
+
+        class ContextNetwork(nn.Module):
+            def __init__(self, n_players, embedding_dim=16, hidden_dim=64, output_dim=32):
+                super().__init__()
+                self.player_embedding = nn.Embedding(n_players, embedding_dim)
+                self.network = nn.Sequential(
+                    nn.Linear(embedding_dim + 2, hidden_dim), nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+                    nn.Linear(hidden_dim, output_dim),
+                )
+            def forward(self, context):
+                player_emb = self.player_embedding(context[:, 0].long())
+                return self.network(torch.cat([player_emb, context[:, 1:3]], dim=1))
+
+        save_dict = joblib.load(MODEL_PATH)
+        hp = save_dict["hyperparameters"]
+        _player_encoder = save_dict["player_encoder"]
+
+        base_dist = distributions.StandardNormal(shape=[2])
+        ctx_net = ContextNetwork(n_players=hp["n_players"], embedding_dim=16, hidden_dim=64, output_dim=hp["context_features"])
+        tlist = []
+        for _ in range(hp["num_layers"]):
+            tlist.append(transforms.MaskedAffineAutoregressiveTransform(
+                features=2, hidden_features=hp["hidden_features"], context_features=hp["context_features"], num_blocks=2))
+            tlist.append(transforms.ReversePermutation(features=2))
+        flow = flows.Flow(transforms.CompositeTransform(tlist), base_dist)
+
+        flow.load_state_dict(save_dict["flow_state_dict"])
+        ctx_net.load_state_dict(save_dict["context_net_state_dict"])
+        flow.eval()
+        ctx_net.eval()
+        _flow = flow
+        _context_net = ctx_net
+        _player_names = sorted(_player_encoder.classes_.tolist())
+        print(f"[lazy] Throw flow model loaded from {MODEL_PATH} ({len(_player_names)} players)")
+        return True
+    except Exception as e:
+        print(f"Warning: Could not load throw flow model: {e}")
+        return False
+
+# Load player encoder only (lightweight — needed for /players endpoint and UMAP)
 try:
-    save_dict = joblib.load(MODEL_PATH)
-    hyperparams = save_dict["hyperparameters"]
-    _player_encoder = save_dict["player_encoder"]
-
-    _flow, _context_net = create_flow(
-        n_players=hyperparams["n_players"],
-        num_layers=hyperparams["num_layers"],
-        hidden_features=hyperparams["hidden_features"],
-        context_features=hyperparams["context_features"],
-    )
-    _flow.load_state_dict(save_dict["flow_state_dict"])
-    _context_net.load_state_dict(save_dict["context_net_state_dict"])
-    _flow.eval()
-    _context_net.eval()
-
+    _encoder_save = joblib.load(MODEL_PATH)
+    _player_encoder = _encoder_save["player_encoder"]
     _player_names = sorted(_player_encoder.classes_.tolist())
-    print(f"ML model loaded from {MODEL_PATH} ({len(_player_names)} players)")
+    print(f"Player encoder loaded ({len(_player_names)} players)")
 except Exception as e:
-    print(f"Warning: Could not load ML model: {e}")
+    print(f"Warning: Could not load player encoder: {e}")
 
-# Load turnover flow model
+# Turnover flow model — lazy-loaded on first cache miss
 TURNOVER_MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "turnover_flow_model.pkl"
 
 _turnover_flow = None
 _turnover_context_net = None
+_turnover_load_attempted = False
 
-try:
-    turnover_save = joblib.load(TURNOVER_MODEL_PATH)
-    turnover_hp = turnover_save["hyperparameters"]
+def _ensure_turnover_flow_loaded():
+    global _turnover_flow, _turnover_context_net, _turnover_load_attempted
+    if _turnover_flow is not None:
+        return True
+    if _turnover_load_attempted:
+        return False
+    _turnover_load_attempted = True
+    try:
+        import torch.nn as nn
+        from nflows import flows, distributions, transforms
 
-    _turnover_flow, _turnover_context_net = create_turnover_flow(
-        num_layers=turnover_hp["num_layers"],
-        hidden_features=turnover_hp["hidden_features"],
-        context_features=turnover_hp["context_features"],
-    )
-    _turnover_flow.load_state_dict(turnover_save["flow_state_dict"])
-    _turnover_context_net.load_state_dict(turnover_save["context_net_state_dict"])
-    _turnover_flow.eval()
-    _turnover_context_net.eval()
-    print(f"Turnover flow model loaded from {TURNOVER_MODEL_PATH}")
-except Exception as e:
-    print(f"Warning: Could not load turnover flow model: {e}")
+        class TurnoverContextNetwork(nn.Module):
+            def __init__(self, hidden_dim=64, output_dim=32):
+                super().__init__()
+                self.network = nn.Sequential(
+                    nn.Linear(2, hidden_dim), nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+                    nn.Linear(hidden_dim, output_dim),
+                )
+            def forward(self, context):
+                return self.network(context)
 
-# Load block flow model (throwaways preceding blocks)
+        turnover_save = joblib.load(TURNOVER_MODEL_PATH)
+        hp = turnover_save["hyperparameters"]
+        ctx_net = TurnoverContextNetwork(hidden_dim=64, output_dim=hp["context_features"])
+        tlist = []
+        for _ in range(hp["num_layers"]):
+            tlist.append(transforms.MaskedAffineAutoregressiveTransform(
+                features=2, hidden_features=hp["hidden_features"], context_features=hp["context_features"], num_blocks=2))
+            tlist.append(transforms.ReversePermutation(features=2))
+        flow = flows.Flow(transforms.CompositeTransform(tlist), distributions.StandardNormal(shape=[2]))
+        flow.load_state_dict(turnover_save["flow_state_dict"])
+        ctx_net.load_state_dict(turnover_save["context_net_state_dict"])
+        flow.eval()
+        ctx_net.eval()
+        _turnover_flow = flow
+        _turnover_context_net = ctx_net
+        print(f"[lazy] Turnover flow model loaded from {TURNOVER_MODEL_PATH}")
+        return True
+    except Exception as e:
+        print(f"Warning: Could not load turnover flow model: {e}")
+        return False
+
+# Block flow model — lazy-loaded on first cache miss
 BLOCK_MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "block_flow_model.pkl"
 
 _block_flow = None
 _block_context_net = None
+_block_load_attempted = False
 
-try:
-    block_save = joblib.load(BLOCK_MODEL_PATH)
-    block_hp = block_save["hyperparameters"]
+def _ensure_block_flow_loaded():
+    global _block_flow, _block_context_net, _block_load_attempted
+    if _block_flow is not None:
+        return True
+    if _block_load_attempted:
+        return False
+    _block_load_attempted = True
+    try:
+        import torch.nn as nn
+        from nflows import flows, distributions, transforms
 
-    # Same architecture as turnover flow (TurnoverContextNetwork with 2 inputs)
-    _block_flow, _block_context_net = create_turnover_flow(
-        num_layers=block_hp["num_layers"],
-        hidden_features=block_hp["hidden_features"],
-        context_features=block_hp["context_features"],
-    )
-    _block_flow.load_state_dict(block_save["flow_state_dict"])
-    _block_context_net.load_state_dict(block_save["context_net_state_dict"])
-    _block_flow.eval()
-    _block_context_net.eval()
-    print(f"Block flow model loaded from {BLOCK_MODEL_PATH}")
-except Exception as e:
-    print(f"Warning: Could not load block flow model: {e}")
+        class TurnoverContextNetwork(nn.Module):
+            def __init__(self, hidden_dim=64, output_dim=32):
+                super().__init__()
+                self.network = nn.Sequential(
+                    nn.Linear(2, hidden_dim), nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+                    nn.Linear(hidden_dim, output_dim),
+                )
+            def forward(self, context):
+                return self.network(context)
 
-# Load completion flow model (for relative density computation)
+        block_save = joblib.load(BLOCK_MODEL_PATH)
+        hp = block_save["hyperparameters"]
+        ctx_net = TurnoverContextNetwork(hidden_dim=64, output_dim=hp["context_features"])
+        tlist = []
+        for _ in range(hp["num_layers"]):
+            tlist.append(transforms.MaskedAffineAutoregressiveTransform(
+                features=2, hidden_features=hp["hidden_features"], context_features=hp["context_features"], num_blocks=2))
+            tlist.append(transforms.ReversePermutation(features=2))
+        flow = flows.Flow(transforms.CompositeTransform(tlist), distributions.StandardNormal(shape=[2]))
+        flow.load_state_dict(block_save["flow_state_dict"])
+        ctx_net.load_state_dict(block_save["context_net_state_dict"])
+        flow.eval()
+        ctx_net.eval()
+        _block_flow = flow
+        _block_context_net = ctx_net
+        print(f"[lazy] Block flow model loaded from {BLOCK_MODEL_PATH}")
+        return True
+    except Exception as e:
+        print(f"Warning: Could not load block flow model: {e}")
+        return False
 
-
-# Load EPV (Expected Possession Value) models
-class EPVNet(nn.Module):
-    """Small neural net for EPV prediction. Must match training notebook architecture."""
-    def __init__(self, input_dim=6):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, x):
-        return self.net(x).squeeze(1)
-
-
+# EPV model — lazy-loaded on first cache miss
 EPV_NN_PATH = Path(__file__).resolve().parent.parent / "models" / "epv_nn.pkl"
 
-_epv_nn: Optional[EPVNet] = None
+_epv_nn = None
 _epv_scaler = None
 _epv_team_encoder = None
+_epv_load_attempted = False
 
-try:
-    epv_nn_save = joblib.load(EPV_NN_PATH)
-    _epv_scaler = epv_nn_save["scaler"]
-    if _epv_team_encoder is None:
-        _epv_team_encoder = epv_nn_save["team_encoder"]
-    _epv_nn = EPVNet(input_dim=epv_nn_save.get("input_dim", 6))
-    _epv_nn.load_state_dict(epv_nn_save["model_state_dict"])
-    _epv_nn.eval()
-    print(f"EPV Neural Net loaded (AUC={epv_nn_save['metrics']['auc']:.4f})")
-except Exception as e:
-    print(f"Warning: Could not load EPV neural net model: {e}")
+def _ensure_epv_loaded():
+    global _epv_nn, _epv_scaler, _epv_team_encoder, _epv_load_attempted
+    if _epv_nn is not None:
+        return True
+    if _epv_load_attempted:
+        return False
+    _epv_load_attempted = True
+    try:
+        import torch
+        import torch.nn as nn
+
+        class EPVNet(nn.Module):
+            def __init__(self, input_dim=6):
+                super().__init__()
+                self.net = nn.Sequential(
+                    nn.Linear(input_dim, 128), nn.ReLU(), nn.Dropout(0.2),
+                    nn.Linear(128, 64), nn.ReLU(), nn.Dropout(0.2),
+                    nn.Linear(64, 32), nn.ReLU(),
+                    nn.Linear(32, 1), nn.Sigmoid(),
+                )
+            def forward(self, x):
+                return self.net(x).squeeze(1)
+
+        epv_save = joblib.load(EPV_NN_PATH)
+        _epv_scaler = epv_save["scaler"]
+        _epv_team_encoder = epv_save["team_encoder"]
+        _epv_nn = EPVNet(input_dim=epv_save.get("input_dim", 6))
+        _epv_nn.load_state_dict(epv_save["model_state_dict"])
+        _epv_nn.eval()
+        print(f"[lazy] EPV Neural Net loaded (AUC={epv_save['metrics']['auc']:.4f})")
+        return True
+    except Exception as e:
+        print(f"Warning: Could not load EPV neural net model: {e}")
+        return False
 
 # Completion NN model definition (must match completion_nn.ipynb)
 # Load lineup XGBoost model (P(score) for a 7-player O-lineup)
@@ -297,6 +303,32 @@ except Exception as e:
 # Player Stats, UMAP, and Clustering (stats-based)
 # ---------------------------------------------------------------------------
 from sklearn.preprocessing import StandardScaler
+
+def _write_umap_cache(players_list: list, coords: np.ndarray, labels: np.ndarray):
+    """Write UMAP coordinates and cluster labels to DB, replacing any existing rows."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS umap_cache (
+                player_id     VARCHAR PRIMARY KEY,
+                umap_x        REAL NOT NULL,
+                umap_y        REAL NOT NULL,
+                cluster_label SMALLINT NOT NULL
+            )
+        """)
+        cur.execute("DELETE FROM umap_cache")
+        from psycopg2.extras import execute_values
+        execute_values(cur,
+            "INSERT INTO umap_cache (player_id, umap_x, umap_y, cluster_label) VALUES %s",
+            [(p, float(coords[i, 0]), float(coords[i, 1]), int(labels[i])) for i, p in enumerate(players_list)]
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"UMAP cache written: {len(players_list)} players")
+    except Exception as e:
+        print(f"Warning: Could not write UMAP cache: {e}")
 
 _player_stats: Dict[str, Dict[str, float]] = {}
 _cluster_summaries: Dict[int, Dict[str, float]] = {}
@@ -373,21 +405,50 @@ try:
 
         stats_array = np.array(stats_matrix)
 
-        # 3. Normalize features, then UMAP
-        scaler = StandardScaler()
-        stats_normalized = scaler.fit_transform(stats_array)
+        # 3. Try loading UMAP + cluster labels from DB cache
+        cache_conn = get_db_connection()
+        cache_cur = cache_conn.cursor()
+        cache_cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_name = 'umap_cache'
+            )
+        """)
+        table_exists = cache_cur.fetchone()["exists"]
 
-        reducer = umap.UMAP(n_neighbors=15, min_dist=0.01, random_state=42)
-        _umap_coordinates = reducer.fit_transform(stats_normalized)
-        print(f"UMAP computed on stats features: {_umap_coordinates.shape}")
+        loaded_from_cache = False
+        if table_exists:
+            cache_cur.execute("SELECT player_id, umap_x, umap_y, cluster_label FROM umap_cache ORDER BY player_id")
+            cache_rows = cache_cur.fetchall()
+            if len(cache_rows) == len(players_list):
+                cache_map = {r["player_id"]: r for r in cache_rows}
+                if all(p in cache_map for p in players_list):
+                    _umap_coordinates = np.array([[cache_map[p]["umap_x"], cache_map[p]["umap_y"]] for p in players_list])
+                    _cluster_labels = np.array([cache_map[p]["cluster_label"] for p in players_list])
+                    loaded_from_cache = True
+                    print(f"UMAP loaded from DB cache: {_umap_coordinates.shape}")
 
-        # 4. K-Means clustering on normalized stats
-        from sklearn.cluster import KMeans
-        kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-        _cluster_labels = kmeans.fit_predict(stats_normalized)
-        print(f"K-Means: 4 clusters, sizes: {[int((_cluster_labels == i).sum()) for i in range(4)]}")
+        cache_cur.close()
+        cache_conn.close()
 
-        # 5. Compute cluster summaries
+        if not loaded_from_cache:
+            # Compute UMAP + KMeans and write to cache
+            import umap as _umap
+            scaler = StandardScaler()
+            stats_normalized = scaler.fit_transform(stats_array)
+
+            reducer = _umap.UMAP(n_neighbors=15, min_dist=0.01, random_state=42)
+            _umap_coordinates = reducer.fit_transform(stats_normalized)
+            print(f"UMAP computed on stats features: {_umap_coordinates.shape}")
+
+            from sklearn.cluster import KMeans
+            kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
+            _cluster_labels = kmeans.fit_predict(stats_normalized)
+            print(f"K-Means: 4 clusters, sizes: {[int((_cluster_labels == i).sum()) for i in range(4)]}")
+
+            _write_umap_cache(players_list, _umap_coordinates, _cluster_labels)
+
+        # 4. Compute cluster summaries (fast, derived from already-loaded data)
         for cluster_id in set(_cluster_labels.tolist()):
             cluster_players = [
                 players_list[i] for i, c in enumerate(_cluster_labels) if c == cluster_id
@@ -925,6 +986,57 @@ def get_player_embeddings() -> Dict[str, Any]:
     }
 
 
+@app.post("/embeddings/recompute")
+def recompute_embeddings():
+    """Force recompute of UMAP + KMeans and update the DB cache."""
+    global _umap_coordinates, _cluster_labels, _cluster_summaries
+    if _player_encoder is None:
+        raise HTTPException(status_code=503, detail="Player encoder not loaded")
+
+    players_list = _player_encoder.classes_.tolist()
+    stats_matrix = []
+    for p in players_list:
+        if p in _player_stats:
+            s = _player_stats[p]
+            stats_matrix.append([s[f] for f in STATS_FEATURES])
+        else:
+            stats_matrix.append([0.0] * len(STATS_FEATURES))
+
+    stats_array = np.array(stats_matrix)
+    scaler = StandardScaler()
+    stats_normalized = scaler.fit_transform(stats_array)
+
+    import umap as _umap
+    reducer = _umap.UMAP(n_neighbors=15, min_dist=0.01, random_state=42)
+    new_coords = reducer.fit_transform(stats_normalized)
+
+    from sklearn.cluster import KMeans
+    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
+    new_labels = kmeans.fit_predict(stats_normalized)
+
+    _umap_coordinates = new_coords
+    _cluster_labels = new_labels
+    _cluster_summaries = {}
+    for cluster_id in set(new_labels.tolist()):
+        cluster_players = [players_list[i] for i, c in enumerate(new_labels) if c == cluster_id]
+        stats_in_cluster = [_player_stats[p] for p in cluster_players if p in _player_stats]
+        if stats_in_cluster:
+            _cluster_summaries[cluster_id] = {
+                'count': len(cluster_players),
+                'avg_completion_pct': round(np.mean([s['completion_pct'] for s in stats_in_cluster]), 1),
+                'avg_throw_dist': round(np.mean([s['avg_throw_dist'] for s in stats_in_cluster]), 1),
+                'avg_throw_depth': round(np.mean([s['avg_throw_depth'] for s in stats_in_cluster]), 1),
+                'avg_huck_rate': round(np.mean([s['huck_rate'] for s in stats_in_cluster]), 1),
+                'avg_goal_pct': round(np.mean([s['goal_pct'] for s in stats_in_cluster]), 1),
+                'avg_total_throws': round(np.mean([s['total_throws'] for s in stats_in_cluster]), 0),
+                'avg_lateral_dist': round(np.mean([s['avg_lateral_dist'] for s in stats_in_cluster]), 1),
+                'avg_dist_from_center': round(np.mean([s['avg_dist_from_center'] for s in stats_in_cluster]), 1),
+            }
+
+    _write_umap_cache(players_list, new_coords, new_labels)
+    return {"status": "ok", "players": len(players_list), "clusters": len(_cluster_summaries)}
+
+
 @app.get("/predict/throws")
 def predict_throws(
     player: str = Query(..., description="Player ID"),
@@ -933,8 +1045,9 @@ def predict_throws(
     grid_size: int = Query(30, ge=10, le=200, description="Grid resolution"),
 ) -> Dict[str, Any]:
     """Predict throw distribution for a player at a field position."""
-    if _flow is None or _context_net is None or _player_encoder is None:
+    if not _ensure_flow_loaded():
         raise HTTPException(status_code=503, detail="Model not loaded")
+    import torch
 
     # Validate player
     if player not in _player_encoder.classes_:
@@ -1010,8 +1123,9 @@ def predict_throws_batch(
         print(f"[cache error] {player}: {e}, falling back to inference")
 
     # Fall back to live inference
-    if _flow is None or _context_net is None or _player_encoder is None:
+    if not _ensure_flow_loaded():
         raise HTTPException(status_code=503, detail="Model not loaded")
+    import torch
 
     if player not in _player_encoder.classes_:
         raise HTTPException(status_code=404, detail=f"Player '{player}' not found in model")
@@ -1042,6 +1156,16 @@ def predict_throws_batch(
     }
 
 
+_TURNOVER_CACHE_ORIGIN_X = np.linspace(-25, 25, 24)
+_TURNOVER_CACHE_ORIGIN_Y = np.linspace(0, 120, 20)
+
+def _nearest_cache_origin(x: float, y: float):
+    """Return (xi, yi) of the nearest precomputed origin in the 24×20 grid."""
+    xi = int(np.argmin(np.abs(_TURNOVER_CACHE_ORIGIN_X - x)))
+    yi = int(np.argmin(np.abs(_TURNOVER_CACHE_ORIGIN_Y - y)))
+    return xi, yi
+
+
 @app.get("/predict/turnovers")
 def predict_turnovers(
     x: float = Query(..., description="Thrower X position (-25 to 25)"),
@@ -1049,33 +1173,40 @@ def predict_turnovers(
     grid_size: int = Query(30, ge=10, le=200, description="Grid resolution"),
 ) -> Dict[str, Any]:
     """Predict turnover destination distribution from a field position."""
-    if _turnover_flow is None or _turnover_context_net is None:
+    xi, yi = _nearest_cache_origin(x, y)
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT grid FROM turnover_heatmap_cache WHERE origin_xi=%s AND origin_yi=%s",
+            (xi, yi)
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            grid = np.frombuffer(bytes(row["grid"]), dtype=np.float16).reshape(120, 100).astype(np.float32)
+            return {"grid": grid.tolist(), "extent": [-25, 25, 0, 120]}
+    except Exception as e:
+        print(f"[turnover cache error] {e}, falling back to inference")
+
+    if not _ensure_turnover_flow_loaded():
         raise HTTPException(status_code=503, detail="Turnover model not loaded")
+    import torch
 
     x_norm = (x + 25) / 50
     y_norm = y / 120
-
     context_input = torch.FloatTensor([[x_norm, y_norm]])
-
     with torch.no_grad():
         context_features = _turnover_context_net(context_input)
-
         x_bins = np.linspace(0, 1, grid_size)
         y_bins = np.linspace(0, 1, int(grid_size * 1.2))
-
         xx, yy = np.meshgrid(x_bins, y_bins)
         grid_points = torch.FloatTensor(np.stack([xx.ravel(), yy.ravel()], axis=1))
-
         context_expanded = context_features.expand(grid_points.shape[0], -1)
         log_probs = _turnover_flow.log_prob(grid_points, context=context_expanded)
         probs = torch.exp(log_probs).numpy()
-
         grid = probs.reshape(len(y_bins), len(x_bins))
-
-    return {
-        "grid": grid.tolist(),
-        "extent": [-25, 25, 0, 120],
-    }
+    return {"grid": grid.tolist(), "extent": [-25, 25, 0, 120]}
 
 
 @app.get("/predict/blocks")
@@ -1085,33 +1216,40 @@ def predict_blocks(
     grid_size: int = Query(30, ge=10, le=200, description="Grid resolution"),
 ) -> Dict[str, Any]:
     """Predict block destination distribution from a field position."""
-    if _block_flow is None or _block_context_net is None:
+    xi, yi = _nearest_cache_origin(x, y)
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT grid FROM block_heatmap_cache WHERE origin_xi=%s AND origin_yi=%s",
+            (xi, yi)
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            grid = np.frombuffer(bytes(row["grid"]), dtype=np.float16).reshape(120, 100).astype(np.float32)
+            return {"grid": grid.tolist(), "extent": [-25, 25, 0, 120]}
+    except Exception as e:
+        print(f"[block cache error] {e}, falling back to inference")
+
+    if not _ensure_block_flow_loaded():
         raise HTTPException(status_code=503, detail="Block model not loaded")
+    import torch
 
     x_norm = (x + 25) / 50
     y_norm = y / 120
-
     context_input = torch.FloatTensor([[x_norm, y_norm]])
-
     with torch.no_grad():
         context_features = _block_context_net(context_input)
-
         x_bins = np.linspace(0, 1, grid_size)
         y_bins = np.linspace(0, 1, int(grid_size * 1.2))
-
         xx, yy = np.meshgrid(x_bins, y_bins)
         grid_points = torch.FloatTensor(np.stack([xx.ravel(), yy.ravel()], axis=1))
-
         context_expanded = context_features.expand(grid_points.shape[0], -1)
         log_probs = _block_flow.log_prob(grid_points, context=context_expanded)
         probs = torch.exp(log_probs).numpy()
-
         grid = probs.reshape(len(y_bins), len(x_bins))
-
-    return {
-        "grid": grid.tolist(),
-        "extent": [-25, 25, 0, 120],
-    }
+    return {"grid": grid.tolist(), "extent": [-25, 25, 0, 120]}
 
 
 @app.get("/heatmap/turnovers")
@@ -1729,10 +1867,48 @@ def get_pull_play_clusters(
 
 def _epv_predict_batch(grid_points: np.ndarray) -> np.ndarray:
     """Run EPV NN inference on a batch of feature rows."""
+    import torch
     scaled = _epv_scaler.transform(grid_points)
     _epv_nn.eval()
     with torch.no_grad():
         return _epv_nn(torch.FloatTensor(scaled)).numpy()
+
+
+def _epv_run_inference(throw_idx: int, team: Optional[str], quarter: Optional[int]) -> list:
+    """Compute EPV grid via live inference. Returns 60×25 list of lists."""
+    xs = np.linspace(-25, 25, 25)
+    ys = np.linspace(0, 120, 60)
+    xx, yy = np.meshgrid(xs, ys)
+    n_points = xx.size
+
+    quarters_to_avg = [quarter] if quarter is not None else [1, 2, 3, 4]
+    if team is not None:
+        try:
+            team_id = int(_epv_team_encoder.transform([team])[0])
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=400, detail=f"Unknown team: {team}")
+        teams_to_avg = [team_id]
+    else:
+        teams_to_avg = list(range(len(_epv_team_encoder.classes_)))
+
+    combos = len(quarters_to_avg) * len(teams_to_avg)
+    all_probs = np.zeros((combos, n_points), dtype=np.float32)
+    idx = 0
+    for q in quarters_to_avg:
+        for tid in teams_to_avg:
+            gp = np.column_stack([
+                xx.ravel(), yy.ravel(),
+                np.full(n_points, throw_idx),
+                np.zeros(n_points),
+                np.zeros(n_points),
+                np.full(n_points, tid),
+                np.full(n_points, q),
+            ]).astype(np.float32)
+            all_probs[idx] = _epv_predict_batch(gp)
+            idx += 1
+
+    grid = all_probs.mean(axis=0).reshape(60, 25)
+    return [[round(float(v), 4) for v in row] for row in grid]
 
 
 @app.get("/epv/heatmap")
@@ -1741,57 +1917,28 @@ def get_epv_heatmap(
     team: Optional[str] = Query(None, description="Team name for team-specific EPV (omit for league average)"),
     quarter: Optional[int] = Query(None, ge=1, le=4, description="Game quarter 1-4 (omit for average over all quarters)"),
 ) -> Dict[str, Any]:
-    """
-    Return EPV probability grid over the field.
-    Grid shape: 60 rows (y) × 25 cols (x), values in [0, 1].
-    """
-    if _epv_nn is None:
-        raise HTTPException(status_code=503, detail="EPV Neural Net model not loaded. Run epv_model.ipynb first.")
-    if _epv_team_encoder is None:
-        raise HTTPException(status_code=503, detail="EPV team encoder not loaded.")
-
+    """Return EPV probability grid over the field. Shape: 60×25, values in [0,1]."""
+    team_key = team or ''
+    quarter_key = quarter or 0
     try:
-        xs = np.linspace(-25, 25, 25)
-        ys = np.linspace(0, 120, 60)
-        xx, yy = np.meshgrid(xs, ys)  # both (60, 25)
-        n_points = xx.size  # 1500
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT grid FROM epv_heatmap_cache WHERE throw_idx=%s AND team=%s AND quarter=%s",
+            (throw_idx, team_key, quarter_key)
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            grid = np.frombuffer(bytes(row["grid"]), dtype=np.float16).reshape(60, 25).astype(np.float32)
+            return {"grid": [[round(float(v), 4) for v in r] for r in grid], "extent": [-25.0, 25.0, 0.0, 120.0], "throw_idx": throw_idx}
+    except Exception as e:
+        print(f"[epv cache error] {e}, falling back to inference")
 
-        quarters_to_avg = [quarter] if quarter is not None else [1, 2, 3, 4]
-        teams_to_avg: list
-
-        if team is not None:
-            try:
-                team_id = int(_epv_team_encoder.transform([team])[0])
-            except (ValueError, KeyError):
-                raise HTTPException(status_code=400, detail=f"Unknown team: {team}")
-            teams_to_avg = [team_id]
-        else:
-            teams_to_avg = list(range(len(_epv_team_encoder.classes_)))
-
-        combos = len(quarters_to_avg) * len(teams_to_avg)
-        all_probs = np.zeros((combos, n_points), dtype=np.float32)
-        idx = 0
-        for q in quarters_to_avg:
-            for tid in teams_to_avg:
-                gp = np.column_stack([
-                    xx.ravel(), yy.ravel(),
-                    np.full(n_points, throw_idx),
-                    np.zeros(n_points),   # prev_throw_dx (neutral)
-                    np.zeros(n_points),   # prev_throw_dy (neutral)
-                    np.full(n_points, tid),
-                    np.full(n_points, q),
-                ]).astype(np.float32)
-                all_probs[idx] = _epv_predict_batch(gp)
-                idx += 1
-
-        grid = all_probs.mean(axis=0).reshape(60, 25)
-
-        return {
-            "grid": [[round(float(v), 4) for v in row] for row in grid],
-            "extent": [-25.0, 25.0, 0.0, 120.0],
-            "throw_idx": throw_idx,
-        }
-
+    if not _ensure_epv_loaded():
+        raise HTTPException(status_code=503, detail="EPV model not loaded")
+    try:
+        return {"grid": _epv_run_inference(throw_idx, team, quarter), "extent": [-25.0, 25.0, 0.0, 120.0], "throw_idx": throw_idx}
     except HTTPException:
         raise
     except Exception as e:
@@ -2063,144 +2210,147 @@ def get_player(player_id: str, year: Optional[int] = None):
     yf_e = "AND e.year = %s" if year else ""
     yp1 = (player_id, year) if year else (player_id,)
 
-    # Per-season throwing stats (GROUP BY year, team)
-    cur.execute(f"""
-        SELECT year, team,
-            COUNT(*) FILTER (WHERE event_type IN (18,19,20,22)) AS throw_attempts,
-            COUNT(*) FILTER (WHERE event_type IN (18,19)) AS completions,
-            COUNT(*) FILTER (WHERE event_type = 19) AS assists,
-            COUNT(*) FILTER (WHERE event_type IN (20,22)) AS turnovers,
-            COUNT(*) FILTER (WHERE event_type IN (18,19) AND receiver_y IS NOT NULL
-                AND ABS(receiver_y - thrower_y) > 30) AS huck_completions,
-            COUNT(*) FILTER (WHERE event_type IN (18,19,20) AND receiver_y IS NOT NULL
-                AND ABS(receiver_y - thrower_y) > 30) AS huck_attempts,
-            ROUND(AVG(CASE WHEN event_type IN (18,19) AND receiver_x IS NOT NULL
-                THEN SQRT(POWER(receiver_x-thrower_x,2)+POWER(receiver_y-thrower_y,2)) END)::numeric, 1) AS avg_throw_dist,
-            ROUND(AVG(CASE WHEN event_type IN (18,19) AND receiver_y IS NOT NULL
-                THEN receiver_y - thrower_y END)::numeric, 1) AS avg_throw_depth
-        FROM events
-        WHERE thrower = %s AND event_type IN (18,19,20,22) {yf_plain}
-        GROUP BY year, team ORDER BY year
-    """, yp1)
-    throw_rows: Dict[int, Any] = {}
-    for r in cur.fetchall():
-        yr = r["year"]
-        # If player was on multiple teams in a year, keep the one with more throws
-        if yr not in throw_rows or (r.get("throw_attempts") or 0) > (throw_rows[yr].get("throw_attempts") or 0):
-            throw_rows[yr] = dict(r)
+    def _fetch_seasons(yf_p, yf_ev, params):
+        """Fetch and merge per-season stats rows. Used for both all-time and filtered."""
+        cur.execute(f"""
+            SELECT year, team,
+                COUNT(*) FILTER (WHERE event_type IN (18,19,20,22)) AS throw_attempts,
+                COUNT(*) FILTER (WHERE event_type IN (18,19)) AS completions,
+                COUNT(*) FILTER (WHERE event_type = 19) AS assists,
+                COUNT(*) FILTER (WHERE event_type IN (20,22)) AS turnovers,
+                COUNT(*) FILTER (WHERE event_type IN (18,19) AND receiver_y IS NOT NULL
+                    AND ABS(receiver_y - thrower_y) > 30) AS huck_completions,
+                COUNT(*) FILTER (WHERE event_type IN (18,19,20) AND receiver_y IS NOT NULL
+                    AND ABS(receiver_y - thrower_y) > 30) AS huck_attempts,
+                ROUND(AVG(CASE WHEN event_type IN (18,19) AND receiver_x IS NOT NULL
+                    THEN SQRT(POWER(receiver_x-thrower_x,2)+POWER(receiver_y-thrower_y,2)) END)::numeric, 1) AS avg_throw_dist,
+                ROUND(AVG(CASE WHEN event_type IN (18,19) AND receiver_y IS NOT NULL
+                    THEN receiver_y - thrower_y END)::numeric, 1) AS avg_throw_depth
+            FROM events
+            WHERE thrower = %s AND event_type IN (18,19,20,22) {yf_p}
+            GROUP BY year, team ORDER BY year
+        """, params)
+        t_rows: Dict[int, Any] = {}
+        for r in cur.fetchall():
+            yr = r["year"]
+            if yr not in t_rows or (r.get("throw_attempts") or 0) > (t_rows[yr].get("throw_attempts") or 0):
+                t_rows[yr] = dict(r)
 
-    # Per-season catching stats
-    cur.execute(f"""
-        SELECT year,
-            COUNT(*) AS catches,
-            COUNT(*) FILTER (WHERE event_type = 19) AS goals_caught
-        FROM events
-        WHERE receiver = %s AND event_type IN (18,19) {yf_plain}
-        GROUP BY year ORDER BY year
-    """, yp1)
-    catch_rows = {r["year"]: dict(r) for r in cur.fetchall()}
+        cur.execute(f"""
+            SELECT year, COUNT(*) AS catches,
+                COUNT(*) FILTER (WHERE event_type = 19) AS goals_caught
+            FROM events
+            WHERE receiver = %s AND event_type IN (18,19) {yf_p}
+            GROUP BY year ORDER BY year
+        """, params)
+        c_rows = {r["year"]: dict(r) for r in cur.fetchall()}
 
-    # Per-season possessions (O-line + D-line)
-    cur.execute(f"""
-        SELECT e.year,
-            COUNT(DISTINCT lp.event_id) FILTER (WHERE lp.line_type = 'O') AS o_possessions,
-            COUNT(DISTINCT lp.event_id) FILTER (WHERE lp.line_type = 'D') AS d_possessions
-        FROM line_players lp
-        JOIN events e ON e.event_id = lp.event_id
-        WHERE lp.player_id = %s {yf_e}
-        GROUP BY e.year ORDER BY e.year
-    """, yp1)
-    poss_rows = {r["year"]: dict(r) for r in cur.fetchall()}
+        cur.execute(f"""
+            SELECT e.year,
+                COUNT(DISTINCT lp.event_id) FILTER (WHERE lp.line_type = 'O') AS o_possessions,
+                COUNT(DISTINCT lp.event_id) FILTER (WHERE lp.line_type = 'D') AS d_possessions
+            FROM line_players lp
+            JOIN events e ON e.event_id = lp.event_id
+            WHERE lp.player_id = %s {yf_ev}
+            GROUP BY e.year ORDER BY e.year
+        """, params)
+        p_rows = {r["year"]: dict(r) for r in cur.fetchall()}
 
-    # Per-season O-hold rate
-    cur.execute(f"""
-        WITH o_starts AS (
-            SELECT e.event_id, e.game_id, e.event_number, e.team, e.year
-            FROM events e
-            JOIN line_players lp ON lp.event_id = e.event_id
-                AND lp.line_type = 'O' AND lp.player_id = %s
-            WHERE e.event_type = 2 {yf_e}
-        ),
-        outcomes AS (
-            SELECT os.event_id, os.year,
-                COALESCE(BOOL_OR(e2.event_type = 19 AND e2.team = os.team), FALSE) AS scored
-            FROM o_starts os
-            LEFT JOIN events e2 ON e2.game_id = os.game_id
-                AND e2.event_number > os.event_number
-                AND e2.event_number < COALESCE(
-                    (SELECT MIN(e3.event_number) FROM events e3
-                     WHERE e3.game_id = os.game_id AND e3.event_type = 1
-                       AND e3.event_number > os.event_number),
-                    9999999
-                )
-            GROUP BY os.event_id, os.year
-        )
-        SELECT year,
-            ROUND(AVG(CASE WHEN scored THEN 1.0 ELSE 0.0 END)::numeric, 4) AS o_hold_rate
-        FROM outcomes
-        GROUP BY year ORDER BY year
-    """, yp1)
-    hold_rows = {r["year"]: float(r["o_hold_rate"] or 0) for r in cur.fetchall()}
+        cur.execute(f"""
+            WITH o_starts AS (
+                SELECT e.event_id, e.game_id, e.event_number, e.team, e.year
+                FROM events e
+                JOIN line_players lp ON lp.event_id = e.event_id
+                    AND lp.line_type = 'O' AND lp.player_id = %s
+                WHERE e.event_type = 2 {yf_ev}
+            ),
+            outcomes AS (
+                SELECT os.event_id, os.year,
+                    COALESCE(BOOL_OR(e2.event_type = 19 AND e2.team = os.team), FALSE) AS scored
+                FROM o_starts os
+                LEFT JOIN events e2 ON e2.game_id = os.game_id
+                    AND e2.event_number > os.event_number
+                    AND e2.event_number < COALESCE(
+                        (SELECT MIN(e3.event_number) FROM events e3
+                         WHERE e3.game_id = os.game_id AND e3.event_type = 1
+                           AND e3.event_number > os.event_number),
+                        9999999
+                    )
+                GROUP BY os.event_id, os.year
+            )
+            SELECT year,
+                ROUND(AVG(CASE WHEN scored THEN 1.0 ELSE 0.0 END)::numeric, 4) AS o_hold_rate
+            FROM outcomes
+            GROUP BY year ORDER BY year
+        """, params)
+        h_rows = {r["year"]: float(r["o_hold_rate"] or 0) for r in cur.fetchall()}
 
-    # Merge per-season data
-    all_years = sorted(set(list(throw_rows.keys()) + list(catch_rows.keys()) + list(poss_rows.keys())))
-    seasons = []
-    for yr in all_years:
-        t = throw_rows.get(yr, {})
-        c = catch_rows.get(yr, {})
-        p = poss_rows.get(yr, {})
-        ta = int(t.get("throw_attempts") or 0)
-        comp = int(t.get("completions") or 0)
-        ha = int(t.get("huck_attempts") or 0)
-        hc = int(t.get("huck_completions") or 0)
-        seasons.append({
-            "year": yr,
-            "team": t.get("team") or "",
-            "o_possessions": int(p.get("o_possessions") or 0),
-            "d_possessions": int(p.get("d_possessions") or 0),
-            "throw_attempts": ta,
-            "completions": comp,
-            "completion_pct": round(comp / ta, 4) if ta > 0 else 0.0,
-            "assists": int(t.get("assists") or 0),
-            "goals": int(c.get("goals_caught") or 0),
-            "turnovers": int(t.get("turnovers") or 0),
-            "huck_attempts": ha,
-            "huck_completions": hc,
-            "huck_pct": round(hc / ha, 4) if ha > 0 else 0.0,
-            "avg_throw_dist": float(t.get("avg_throw_dist") or 0),
-            "avg_throw_depth": float(t.get("avg_throw_depth") or 0),
-            "catches": int(c.get("catches") or 0),
-            "o_hold_rate": hold_rows.get(yr, 0.0),
-        })
+        cur.execute(f"""
+            SELECT year, COUNT(*) AS blocks
+            FROM events
+            WHERE defender = %s AND event_type = 11 {yf_p}
+            GROUP BY year ORDER BY year
+        """, params)
+        b_rows = {r["year"]: int(r["blocks"]) for r in cur.fetchall()}
 
-    # Career totals
-    total_ta = sum(s["throw_attempts"] for s in seasons)
-    total_comp = sum(s["completions"] for s in seasons)
-    total_ha = sum(s["huck_attempts"] for s in seasons)
-    total_hc = sum(s["huck_completions"] for s in seasons)
-    total_opp = sum(s["o_possessions"] for s in seasons)
-    weighted_dist = sum(s["avg_throw_dist"] * s["completions"] for s in seasons if s["completions"] > 0)
-    weighted_depth = sum(s["avg_throw_depth"] * s["completions"] for s in seasons if s["completions"] > 0)
-    weighted_hold = sum(s["o_hold_rate"] * s["o_possessions"] for s in seasons if s["o_possessions"] > 0)
-    career = {
-        "year": 0,
-        "team": "Career",
-        "o_possessions": total_opp,
-        "d_possessions": sum(s["d_possessions"] for s in seasons),
-        "throw_attempts": total_ta,
-        "completions": total_comp,
-        "completion_pct": round(total_comp / total_ta, 4) if total_ta > 0 else 0.0,
-        "assists": sum(s["assists"] for s in seasons),
-        "goals": sum(s["goals"] for s in seasons),
-        "turnovers": sum(s["turnovers"] for s in seasons),
-        "huck_attempts": total_ha,
-        "huck_completions": total_hc,
-        "huck_pct": round(total_hc / total_ha, 4) if total_ha > 0 else 0.0,
-        "avg_throw_dist": round(weighted_dist / total_comp, 1) if total_comp > 0 else 0.0,
-        "avg_throw_depth": round(weighted_depth / total_comp, 1) if total_comp > 0 else 0.0,
-        "catches": sum(s["catches"] for s in seasons),
-        "o_hold_rate": round(weighted_hold / total_opp, 4) if total_opp > 0 else 0.0,
-    }
+        all_yrs = sorted(set(list(t_rows.keys()) + list(c_rows.keys()) + list(p_rows.keys())))
+        result = []
+        for yr in all_yrs:
+            t = t_rows.get(yr, {}); c = c_rows.get(yr, {}); p = p_rows.get(yr, {})
+            ta = int(t.get("throw_attempts") or 0); comp = int(t.get("completions") or 0)
+            ha = int(t.get("huck_attempts") or 0); hc = int(t.get("huck_completions") or 0)
+            result.append({
+                "year": yr, "team": t.get("team") or "",
+                "o_possessions": int(p.get("o_possessions") or 0),
+                "d_possessions": int(p.get("d_possessions") or 0),
+                "throw_attempts": ta, "completions": comp,
+                "completion_pct": round(comp / ta, 4) if ta > 0 else 0.0,
+                "assists": int(t.get("assists") or 0),
+                "goals": int(c.get("goals_caught") or 0),
+                "turnovers": int(t.get("turnovers") or 0),
+                "huck_attempts": ha, "huck_completions": hc,
+                "huck_pct": round(hc / ha, 4) if ha > 0 else 0.0,
+                "avg_throw_dist": float(t.get("avg_throw_dist") or 0),
+                "avg_throw_depth": float(t.get("avg_throw_depth") or 0),
+                "catches": int(c.get("catches") or 0),
+                "blocks": b_rows.get(yr, 0),
+                "o_hold_rate": h_rows.get(yr, 0.0),
+            })
+        return result
+
+    # Always fetch all seasons for career totals; filter separately for display
+    all_seasons = _fetch_seasons("", "", (player_id,))
+    seasons = [s for s in all_seasons if s["year"] == year] if year else all_seasons
+
+    # Career totals always computed from all seasons
+    def _career_from_seasons(ss):
+        total_ta = sum(s["throw_attempts"] for s in ss)
+        total_comp = sum(s["completions"] for s in ss)
+        total_ha = sum(s["huck_attempts"] for s in ss)
+        total_hc = sum(s["huck_completions"] for s in ss)
+        total_opp = sum(s["o_possessions"] for s in ss)
+        weighted_dist = sum(s["avg_throw_dist"] * s["completions"] for s in ss if s["completions"] > 0)
+        weighted_depth = sum(s["avg_throw_depth"] * s["completions"] for s in ss if s["completions"] > 0)
+        weighted_hold = sum(s["o_hold_rate"] * s["o_possessions"] for s in ss if s["o_possessions"] > 0)
+        return {
+            "year": 0, "team": "Career",
+            "o_possessions": total_opp,
+            "d_possessions": sum(s["d_possessions"] for s in ss),
+            "throw_attempts": total_ta, "completions": total_comp,
+            "completion_pct": round(total_comp / total_ta, 4) if total_ta > 0 else 0.0,
+            "assists": sum(s["assists"] for s in ss),
+            "goals": sum(s["goals"] for s in ss),
+            "turnovers": sum(s["turnovers"] for s in ss),
+            "huck_attempts": total_ha, "huck_completions": total_hc,
+            "huck_pct": round(total_hc / total_ha, 4) if total_ha > 0 else 0.0,
+            "avg_throw_dist": round(weighted_dist / total_comp, 1) if total_comp > 0 else 0.0,
+            "avg_throw_depth": round(weighted_depth / total_comp, 1) if total_comp > 0 else 0.0,
+            "catches": sum(s["catches"] for s in ss),
+            "blocks": sum(s["blocks"] for s in ss),
+            "o_hold_rate": round(weighted_hold / total_opp, 4) if total_opp > 0 else 0.0,
+        }
+
+    career = _career_from_seasons(all_seasons)
 
     # Top 5 targets (who this player throws to most)
     cur.execute(f"""
@@ -2209,7 +2359,7 @@ def get_player(player_id: str, year: Optional[int] = None):
             ROUND(SUM(CASE WHEN e.event_type IN (18,19) THEN 1.0 ELSE 0.0 END) / COUNT(*), 3) AS completion_pct
         FROM events e
         LEFT JOIN players p ON p.player_id = e.receiver
-        WHERE e.thrower = %s AND e.event_type IN (18,19,20) AND e.receiver IS NOT NULL {yf_plain}
+        WHERE e.thrower = %s AND e.event_type IN (18,19,20) AND e.receiver IS NOT NULL {yf_e}
         GROUP BY e.receiver, p.full_name
         ORDER BY count DESC LIMIT 5
     """, yp1)
@@ -2225,7 +2375,7 @@ def get_player(player_id: str, year: Optional[int] = None):
             ROUND(SUM(CASE WHEN e.event_type IN (18,19) THEN 1.0 ELSE 0.0 END) / COUNT(*), 3) AS completion_pct
         FROM events e
         LEFT JOIN players p ON p.player_id = e.thrower
-        WHERE e.receiver = %s AND e.event_type IN (18,19,20) {yf_plain}
+        WHERE e.receiver = %s AND e.event_type IN (18,19,20) {yf_e}
         GROUP BY e.thrower, p.full_name
         ORDER BY count DESC LIMIT 5
     """, yp1)
@@ -2344,6 +2494,44 @@ def get_player_throw_tendencies(player_id: str, year: Optional[int] = None):
         "total_throws": total,
         "max_avg_dist": round(max_avg_dist, 1),
     }
+
+
+@app.get("/player/{player_id}/block-types")
+def get_player_block_types(player_id: str, year: Optional[int] = None):
+    """Classify each block by the throw type it came from: huck / short / reset."""
+    yf = "AND b.year = %s" if year else ""
+    params = (player_id, year) if year else (player_id,)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT
+            CASE
+                WHEN SQRT(
+                    POWER(COALESCE(prev.receiver_x, prev.turnover_x, prev.thrower_x) - prev.thrower_x, 2) +
+                    POWER(COALESCE(prev.receiver_y, prev.turnover_y, prev.thrower_y) - prev.thrower_y, 2)
+                ) >= 30 THEN 'huck'
+                WHEN (COALESCE(prev.receiver_y, prev.turnover_y, prev.thrower_y) - prev.thrower_y) < 2 THEN 'reset'
+                ELSE 'short'
+            END AS block_type,
+            COUNT(*) AS cnt
+        FROM events b
+        JOIN events prev
+          ON prev.game_id = b.game_id
+         AND prev.event_number = b.event_number - 1
+        WHERE b.event_type = 11
+          AND b.defender = %s
+          AND prev.thrower_x IS NOT NULL {yf}
+        GROUP BY block_type
+    """, params)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    result = {"huck": 0, "short": 0, "reset": 0}
+    for r in rows:
+        if r["block_type"] in result:
+            result[r["block_type"]] = int(r["cnt"])
+    result["total"] = result["huck"] + result["short"] + result["reset"]
+    return result
 
 
 if __name__ == "__main__":
