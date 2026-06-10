@@ -96,8 +96,8 @@ print(f"Loaded model: {len(players)} players")
 # --- Grid definitions ---
 ORIGIN_X = np.linspace(-25, 25, 24)   # 24 positions
 ORIGIN_Y = np.linspace(0, 120, 20)    # 20 positions
-X_BINS = np.linspace(0, 1, 30)        # heatmap cols
-Y_BINS = np.linspace(0, 1, 36)        # heatmap rows
+X_BINS = np.linspace(0, 1, 100)       # heatmap cols
+Y_BINS = np.linspace(0, 1, 120)       # heatmap rows
 xx, yy = np.meshgrid(X_BINS, Y_BINS)
 GRID_POINTS = torch.FloatTensor(np.stack([xx.ravel(), yy.ravel()], axis=1))
 

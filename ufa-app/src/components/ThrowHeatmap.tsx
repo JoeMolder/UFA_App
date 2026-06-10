@@ -161,49 +161,21 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
     if (!selectedPlayer) return
     let cancelled = false
 
-    const GRID_X = 10
-    const GRID_Y = 24
-    const RESOLUTION = 200
-
-    const fetchRowByRow = async () => {
+    const fetchBatch = async () => {
       setLoading(true)
       setLoadingProgress(0)
 
-      const xPositions = Array.from({ length: GRID_X }, (_, i) => -25 + (50 * i) / (GRID_X - 1))
-      const yPositions = Array.from({ length: GRID_Y }, (_, i) => (120 * i) / (GRID_Y - 1))
-      const grids: Record<string, number[][]> = {}
-      const totalCalls = GRID_X * GRID_Y
-      let completed = 0
-
       try {
-        // Process one x-row at a time, all y positions in parallel per row
-        for (let xi = 0; xi < GRID_X; xi++) {
-          if (cancelled) return
-
-          const rowPromises = yPositions.map(async (fieldY, yi) => {
-            const result = await api.predictThrows(selectedPlayer, xPositions[xi], fieldY, RESOLUTION)
-            grids[`${xi},${yi}`] = result.grid
-            completed++
-            if (!cancelled) {
-              setLoadingProgress(Math.round((completed / totalCalls) * 100))
-            }
-          })
-
-          await Promise.all(rowPromises)
-        }
-
+        const result = await api.predictThrowsBatch(selectedPlayer)
         if (cancelled) return
 
-        const batchResult = {
-          grids,
-          x_positions: xPositions,
-          y_positions: yPositions,
-          extent: [-25, 25, 0, 120] as [number, number, number, number],
-        }
-
-        setBatchData(batchResult)
-        const initialGrid = grids['4,11'] // roughly center
-        setCurrentGrid(initialGrid || null)
+        setBatchData(result)
+        // Pick the grid closest to center of field
+        const nX = result.x_positions.length
+        const nY = result.y_positions.length
+        const centerKey = `${Math.floor(nX / 2)},${Math.floor(nY / 2)}`
+        setCurrentGrid(result.grids[centerKey] || null)
+        setLoadingProgress(100)
       } catch (err) {
         console.error('Prediction loading failed:', err)
       } finally {
@@ -213,7 +185,7 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
       }
     }
 
-    fetchRowByRow()
+    fetchBatch()
     return () => { cancelled = true }
   }, [selectedPlayer])
 

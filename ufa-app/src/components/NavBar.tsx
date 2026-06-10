@@ -6,7 +6,6 @@ const NAV_LINKS = [
   { label: 'Predict', path: '/predict' },
   { label: 'EPV', path: '/epv' },
   { label: 'Turnovers', path: '/turnovers' },
-  { label: 'Completion', path: '/completion' },
   { label: 'Synergy', path: '/line-synergy' },
   { label: 'Embeddings', path: '/embeddings' },
 ]

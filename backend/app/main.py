@@ -271,43 +271,6 @@ except Exception as e:
     print(f"Warning: Could not load EPV neural net model: {e}")
 
 # Completion NN model definition (must match completion_nn.ipynb)
-class CompletionNet(nn.Module):
-    def __init__(self, n_throwers, embed_dim=16, hidden=(128, 64, 32), dropout=0.3):
-        super().__init__()
-        self.embed = nn.Embedding(n_throwers, embed_dim)
-        in_dim = 8 + embed_dim
-        layers = []
-        for h in hidden:
-            layers += [nn.Linear(in_dim, h), nn.BatchNorm1d(h), nn.ReLU(), nn.Dropout(dropout)]
-            in_dim = h
-            dropout = max(dropout - 0.1, 0.1)
-        layers.append(nn.Linear(in_dim, 1))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x_cont, x_throw):
-        emb = self.embed(x_throw)
-        x = torch.cat([x_cont, emb], dim=1)
-        return self.net(x).squeeze(1)
-
-# Load completion NN model (per-thrower P(completion | from, to))
-COMPLETION_NN_PATH = Path(__file__).resolve().parent.parent / "models" / "completion_nn.pkl"
-
-_completion_nn: Optional[CompletionNet] = None
-_completion_thrower_encoder = None
-_completion_scaler = None
-
-try:
-    completion_nn_save = joblib.load(COMPLETION_NN_PATH)
-    cfg = completion_nn_save["model_config"]
-    _completion_nn = CompletionNet(**cfg)
-    _completion_nn.load_state_dict(completion_nn_save["model_state"])
-    _completion_nn.eval()
-    _completion_thrower_encoder = completion_nn_save["encoder"]
-    _completion_scaler = completion_nn_save["scaler"]
-    print(f"Completion NN loaded (AUC={completion_nn_save['metrics']['auc']:.4f}, {len(_completion_thrower_encoder.classes_)} throwers)")
-except Exception as e:
-    print(f"Warning: Could not load completion NN model: {e}")
-
 # Load lineup XGBoost model (P(score) for a 7-player O-lineup)
 LINEUP_XGB_PATH = Path(__file__).resolve().parent.parent / "models" / "lineup_xgb.pkl"
 
@@ -1028,11 +991,12 @@ def predict_throws_batch(
         rows = cur.fetchall()
         conn.close()
         if rows:
+            print(f"[cache hit] {player}: {len(rows)} rows")
             results = {}
             x_positions_set = sorted(set(r["origin_x"] for r in rows))
             y_positions_set = sorted(set(r["origin_y"] for r in rows))
             for r in rows:
-                grid = np.frombuffer(bytes(r["grid"]), dtype=np.float16).reshape(36, 30).astype(np.float32)
+                grid = np.frombuffer(bytes(r["grid"]), dtype=np.float16).reshape(120, 100).astype(np.float32)
                 results[f"{r['origin_xi']},{r['origin_yi']}"] = grid.tolist()
             return {
                 "grids": results,
@@ -1040,8 +1004,10 @@ def predict_throws_batch(
                 "y_positions": y_positions_set,
                 "extent": [-25, 25, 0, 120],
             }
-    except Exception:
-        pass
+        else:
+            print(f"[cache miss] {player}: no rows found, falling back to inference")
+    except Exception as e:
+        print(f"[cache error] {player}: {e}, falling back to inference")
 
     # Fall back to live inference
     if _flow is None or _context_net is None or _player_encoder is None:
@@ -1828,114 +1794,6 @@ def get_epv_heatmap(
 
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------------------------------------------------------------------
-# Completion % Endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/completion/throwers")
-def get_completion_throwers():
-    """Return sorted list of throwers known to the completion model, with full names."""
-    if _completion_thrower_encoder is None:
-        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_nn.ipynb first.")
-    slugs = sorted(_completion_thrower_encoder.classes_.tolist())
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT player_id, full_name FROM players WHERE player_id = ANY(%s)", (slugs,))
-    name_map = {r["player_id"]: r["full_name"] for r in cur.fetchall()}
-    cur.close()
-    conn.close()
-    return [{"id": s, "name": name_map.get(s, s)} for s in slugs]
-
-
-def _completion_nn_infer(X_cont: np.ndarray, thrower_enc: int) -> np.ndarray:
-    """Run NN inference on a batch of continuous features with a single thrower index."""
-    X_scaled = _completion_scaler.transform(X_cont).astype(np.float32)
-    X_throw = np.full(len(X_cont), thrower_enc, dtype=np.int64)
-    with torch.no_grad():
-        logits = _completion_nn(
-            torch.FloatTensor(X_scaled),
-            torch.LongTensor(X_throw),
-        )
-        return torch.sigmoid(logits).numpy()
-
-
-@app.get("/completion/heatmap")
-def get_completion_heatmap(
-    thrower: str = Query(..., description="Thrower name"),
-    from_x: float = Query(..., description="Throw origin X (-25 to 25)"),
-    from_y: float = Query(..., description="Throw origin Y (0 to 120)"),
-) -> Dict[str, Any]:
-    """
-    Return completion probability grid for all target positions from a given origin.
-    Grid shape: 60 rows (y) × 25 cols (x), values in [0, 1].
-    """
-    if _completion_nn is None or _completion_thrower_encoder is None:
-        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_nn.ipynb first.")
-
-    try:
-        thrower_enc = int(_completion_thrower_encoder.transform([thrower])[0]) \
-            if thrower in _completion_thrower_encoder.classes_ else 0
-
-        xs = np.linspace(-25, 25, 25)
-        ys = np.linspace(0, 120, 60)
-        xx, yy = np.meshgrid(xs, ys)  # (60, 25)
-
-        to_x = xx.ravel()
-        to_y = yy.ravel()
-        dy = to_y - from_y
-        dx = to_x - from_x
-        dist = np.sqrt(dx**2 + dy**2)
-        angle = np.arctan2(dy, dx)
-
-        X_cont = np.column_stack([
-            np.full(xx.size, from_x),
-            np.full(xx.size, from_y),
-            to_x, to_y,
-            dist, dy, dx, angle,
-        ]).astype(np.float32)
-
-        probs = _completion_nn_infer(X_cont, thrower_enc)
-        grid = probs.reshape(60, 25)
-
-        return {
-            "grid": [[round(float(v), 4) for v in row] for row in grid],
-            "extent": [-25.0, 25.0, 0.0, 120.0],
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/completion/predict")
-def get_completion_predict(
-    thrower: str = Query(..., description="Thrower name"),
-    from_x: float = Query(..., description="Throw origin X (-25 to 25)"),
-    from_y: float = Query(..., description="Throw origin Y (0 to 120)"),
-    to_x: float = Query(..., description="Throw target X (-25 to 25)"),
-    to_y: float = Query(..., description="Throw target Y (0 to 120)"),
-) -> Dict[str, Any]:
-    """Return completion probability for a single from→to throw by a specific thrower."""
-    if _completion_nn is None or _completion_thrower_encoder is None:
-        raise HTTPException(status_code=503, detail="Completion model not loaded. Run completion_nn.ipynb first.")
-
-    try:
-        thrower_enc = int(_completion_thrower_encoder.transform([thrower])[0]) \
-            if thrower in _completion_thrower_encoder.classes_ else 0
-
-        dy = to_y - from_y
-        dx = to_x - from_x
-        dist = float(np.sqrt(dx**2 + dy**2))
-        angle = float(np.arctan2(dy, dx))
-
-        X_cont = np.array([[from_x, from_y, to_x, to_y, dist, dy, dx, angle]], dtype=np.float32)
-        prob = float(_completion_nn_infer(X_cont, thrower_enc)[0])
-
-        return {"probability": round(prob, 4), "thrower": thrower}
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -7,7 +7,6 @@ import Prediction from './pages/Prediction'
 import Embeddings from './pages/Embeddings'
 import Turnovers from './pages/Turnovers'
 import EPV from './pages/EPV'
-import CompletionPredictor from './pages/CompletionPredictor'
 import LineSynergy from './pages/LineSynergy'
 import TeamPage from './pages/TeamPage'
 import PlayerPage from './pages/PlayerPage'
@@ -24,7 +23,6 @@ function App() {
           <Route path="/embeddings" element={<Embeddings />} />
           <Route path="/turnovers" element={<Turnovers />} />
           <Route path="/epv" element={<EPV />} />
-          <Route path="/completion" element={<CompletionPredictor />} />
           <Route path="/line-synergy" element={<LineSynergy />} />
           <Route path="/team/:teamId" element={<TeamPage />} />
           <Route path="/player/:playerId" element={<PlayerPage />} />
