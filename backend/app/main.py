@@ -23,8 +23,9 @@ app = FastAPI(title="UFA Analytics API")
 
 # CORS - allow frontend origins (local dev + production)
 _cors_origins = ["http://localhost:5173"]
-if os.getenv("FRONTEND_URL"):
-    _cors_origins.append(os.getenv("FRONTEND_URL"))
+for _url in (os.getenv("FRONTEND_URL", ""), os.getenv("FRONTEND_URL_WWW", "")):
+    if _url:
+        _cors_origins.append(_url)
 
 app.add_middleware(
     CORSMiddleware,
@@ -299,8 +300,7 @@ try:
     completion_nn_save = joblib.load(COMPLETION_NN_PATH)
     cfg = completion_nn_save["model_config"]
     _completion_nn = CompletionNet(**cfg)
-    state = {k: v.cpu() if hasattr(v, 'cpu') else v for k, v in completion_nn_save["model_state"].items()}
-    _completion_nn.load_state_dict(state)
+    _completion_nn.load_state_dict(completion_nn_save["model_state"])
     _completion_nn.eval()
     _completion_thrower_encoder = completion_nn_save["encoder"]
     _completion_scaler = completion_nn_save["scaler"]
@@ -1005,6 +1005,9 @@ def predict_throws(
     }
 
 
+_THROW_CACHE_ORIGIN_X = np.linspace(-25, 25, 24)
+_THROW_CACHE_ORIGIN_Y = np.linspace(0, 120, 20)
+
 @app.get("/predict/throws/batch")
 def predict_throws_batch(
     player: str = Query(..., description="Player ID"),
@@ -1012,7 +1015,35 @@ def predict_throws_batch(
     grid_cells_y: int = Query(12, ge=3, le=24, description="Number of grid cells across field length"),
     heatmap_resolution: int = Query(30, ge=10, le=200, description="Resolution of each heatmap"),
 ) -> Dict[str, Any]:
-    """Pre-compute throw predictions for a grid of thrower positions."""
+    """Return throw density heatmaps from DB cache, falling back to live inference."""
+
+    # Try DB cache first
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT origin_xi, origin_yi, origin_x, origin_y, grid FROM throw_heatmap_cache WHERE player_id=%s ORDER BY origin_xi, origin_yi",
+            (player,)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        if rows:
+            results = {}
+            x_positions_set = sorted(set(r["origin_x"] for r in rows))
+            y_positions_set = sorted(set(r["origin_y"] for r in rows))
+            for r in rows:
+                grid = np.frombuffer(bytes(r["grid"]), dtype=np.float16).reshape(36, 30).astype(np.float32)
+                results[f"{r['origin_xi']},{r['origin_yi']}"] = grid.tolist()
+            return {
+                "grids": results,
+                "x_positions": x_positions_set,
+                "y_positions": y_positions_set,
+                "extent": [-25, 25, 0, 120],
+            }
+    except Exception:
+        pass
+
+    # Fall back to live inference
     if _flow is None or _context_net is None or _player_encoder is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -1020,34 +1051,23 @@ def predict_throws_batch(
         raise HTTPException(status_code=404, detail=f"Player '{player}' not found in model")
 
     player_encoded = int(_player_encoder.transform([player])[0])
-
-    # Build grid of thrower positions across the field
     x_positions = np.linspace(-25, 25, grid_cells_x)
     y_positions = np.linspace(0, 120, grid_cells_y)
-
-    # Pre-compute the heatmap grid points (shared across all positions)
     x_bins = np.linspace(0, 1, heatmap_resolution)
     y_bins = np.linspace(0, 1, int(heatmap_resolution * 1.2))
     xx, yy = np.meshgrid(x_bins, y_bins)
     grid_points = torch.FloatTensor(np.stack([xx.ravel(), yy.ravel()], axis=1))
-
     results = {}
-
     with torch.no_grad():
         for xi, field_x in enumerate(x_positions):
             for yi, field_y in enumerate(y_positions):
                 x_norm = (field_x + 25) / 50
                 y_norm = field_y / 120
-
-                context_input = torch.FloatTensor([[player_encoded, x_norm, y_norm]])
-                context_features = _context_net(context_input)
-                context_expanded = context_features.expand(grid_points.shape[0], -1)
-                log_probs = _flow.log_prob(grid_points, context=context_expanded)
+                ctx = torch.FloatTensor([[player_encoded, x_norm, y_norm]])
+                ctx_feat = _context_net(ctx).expand(grid_points.shape[0], -1)
+                log_probs = _flow.log_prob(grid_points, context=ctx_feat)
                 probs = torch.exp(log_probs).numpy()
-                grid = probs.reshape(len(y_bins), len(x_bins))
-
-                results[f"{xi},{yi}"] = grid.tolist()
-
+                results[f"{xi},{yi}"] = probs.reshape(len(y_bins), len(x_bins)).tolist()
     return {
         "grids": results,
         "x_positions": x_positions.tolist(),
