@@ -386,6 +386,16 @@ export const api = {
     return response.data;
   },
 
+  getTurnoversBatch: async (): Promise<BatchPredictionResponse> => {
+    const response = await apiClient.get<BatchPredictionResponse>('/predict/turnovers/batch');
+    return response.data;
+  },
+
+  getBlocksBatch: async (): Promise<BatchPredictionResponse> => {
+    const response = await apiClient.get<BatchPredictionResponse>('/predict/blocks/batch');
+    return response.data;
+  },
+
   // Get relative density (turnover/completion ratio) prediction
   predictRelativeDensity: async (
     x: number,

@@ -1168,6 +1168,50 @@ def _nearest_cache_origin(x: float, y: float):
     return xi, yi
 
 
+@app.get("/predict/turnovers/batch")
+def predict_turnovers_batch() -> Dict[str, Any]:
+    """Return all precomputed turnover heatmaps from DB cache in one shot."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT origin_xi, origin_yi, origin_x, origin_y, grid FROM turnover_heatmap_cache ORDER BY origin_xi, origin_yi")
+        rows = cur.fetchall()
+        conn.close()
+        if rows:
+            x_positions = sorted(set(float(r["origin_x"]) for r in rows))
+            y_positions = sorted(set(float(r["origin_y"]) for r in rows))
+            grids = {}
+            for r in rows:
+                grid = np.frombuffer(bytes(r["grid"]), dtype=np.float16).reshape(120, 100).astype(np.float32)
+                grids[f"{r['origin_xi']},{r['origin_yi']}"] = grid.tolist()
+            return {"grids": grids, "x_positions": x_positions, "y_positions": y_positions, "extent": [-25, 25, 0, 120]}
+    except Exception as e:
+        print(f"[turnovers batch cache error] {e}")
+    raise HTTPException(status_code=503, detail="Turnover cache not available")
+
+
+@app.get("/predict/blocks/batch")
+def predict_blocks_batch() -> Dict[str, Any]:
+    """Return all precomputed block heatmaps from DB cache in one shot."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT origin_xi, origin_yi, origin_x, origin_y, grid FROM block_heatmap_cache ORDER BY origin_xi, origin_yi")
+        rows = cur.fetchall()
+        conn.close()
+        if rows:
+            x_positions = sorted(set(float(r["origin_x"]) for r in rows))
+            y_positions = sorted(set(float(r["origin_y"]) for r in rows))
+            grids = {}
+            for r in rows:
+                grid = np.frombuffer(bytes(r["grid"]), dtype=np.float16).reshape(120, 100).astype(np.float32)
+                grids[f"{r['origin_xi']},{r['origin_yi']}"] = grid.tolist()
+            return {"grids": grids, "x_positions": x_positions, "y_positions": y_positions, "extent": [-25, 25, 0, 120]}
+    except Exception as e:
+        print(f"[blocks batch cache error] {e}")
+    raise HTTPException(status_code=503, detail="Block cache not available")
+
+
 @app.get("/predict/turnovers")
 def predict_turnovers(
     x: float = Query(..., description="Thrower X position (-25 to 25)"),

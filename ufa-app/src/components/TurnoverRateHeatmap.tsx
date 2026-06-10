@@ -117,46 +117,26 @@ function TurnoverRateHeatmap() {
   // Fetch block predictions row-by-row
   useEffect(() => {
     let cancelled = false
-    const GRID_X = 10
-    const GRID_Y = 24
-    const RESOLUTION = 200
 
-    const fetchRowByRow = async () => {
+    const fetchBatch = async () => {
       setLoading(true)
       setLoadingProgress(0)
-      const xPositions = Array.from({ length: GRID_X }, (_, i) => -25 + (50 * i) / (GRID_X - 1))
-      const yPositions = Array.from({ length: GRID_Y }, (_, i) => (120 * i) / (GRID_Y - 1))
-      const grids: Record<string, number[][]> = {}
-      const totalCalls = GRID_X * GRID_Y
-      let completed = 0
-
       try {
-        for (let xi = 0; xi < GRID_X; xi++) {
-          if (cancelled) return
-          const rowPromises = yPositions.map(async (fieldY, yi) => {
-            const result = await api.predictBlocks(xPositions[xi], fieldY, RESOLUTION)
-            grids[`${xi},${yi}`] = result.grid
-            completed++
-            if (!cancelled) setLoadingProgress(Math.round((completed / totalCalls) * 100))
-          })
-          await Promise.all(rowPromises)
-        }
+        const result = await api.getBlocksBatch()
         if (cancelled) return
-        setBatchData({
-          grids,
-          x_positions: xPositions,
-          y_positions: yPositions,
-          extent: [-25, 25, 0, 120] as [number, number, number, number],
-        })
-        setCurrentGrid(grids['4,11'] || null)
+        setLoadingProgress(100)
+        setBatchData(result)
+        const midXi = Math.floor(result.x_positions.length / 2)
+        const midYi = Math.floor(result.y_positions.length / 2)
+        setCurrentGrid(result.grids[`${midXi},${midYi}`] || null)
       } catch (err) {
-        console.error('Block prediction loading failed:', err)
+        console.error('Block batch loading failed:', err)
       } finally {
         if (!cancelled) setTimeout(() => setLoading(false), 200)
       }
     }
 
-    fetchRowByRow()
+    fetchBatch()
     return () => { cancelled = true }
   }, [])
 
