@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 import psycopg2
+import base64
 from psycopg2.extras import RealDictCursor
 from typing import List, Dict, Any, Optional
 import os
@@ -1111,8 +1112,7 @@ def predict_throws_batch(
             x_positions_set = sorted(set(r["origin_x"] for r in rows))
             y_positions_set = sorted(set(r["origin_y"] for r in rows))
             for r in rows:
-                grid = np.frombuffer(bytes(r["grid"]), dtype=np.float16).reshape(120, 100).astype(np.float32)
-                results[f"{r['origin_xi']},{r['origin_yi']}"] = grid.tolist()
+                results[f"{r['origin_xi']},{r['origin_yi']}"] = base64.b64encode(bytes(r["grid"])).decode()
             return {
                 "grids": results,
                 "x_positions": x_positions_set,
@@ -1182,8 +1182,7 @@ def predict_turnovers_batch() -> Dict[str, Any]:
             y_positions = sorted(set(float(r["origin_y"]) for r in rows))
             grids = {}
             for r in rows:
-                grid = np.frombuffer(bytes(r["grid"]), dtype=np.float16).reshape(120, 100).astype(np.float32)
-                grids[f"{r['origin_xi']},{r['origin_yi']}"] = grid.tolist()
+                grids[f"{r['origin_xi']},{r['origin_yi']}"] = base64.b64encode(bytes(r["grid"])).decode()
             return {"grids": grids, "x_positions": x_positions, "y_positions": y_positions, "extent": [-25, 25, 0, 120]}
     except Exception as e:
         print(f"[turnovers batch cache error] {e}")
@@ -1204,8 +1203,7 @@ def predict_blocks_batch() -> Dict[str, Any]:
             y_positions = sorted(set(float(r["origin_y"]) for r in rows))
             grids = {}
             for r in rows:
-                grid = np.frombuffer(bytes(r["grid"]), dtype=np.float16).reshape(120, 100).astype(np.float32)
-                grids[f"{r['origin_xi']},{r['origin_yi']}"] = grid.tolist()
+                grids[f"{r['origin_xi']},{r['origin_yi']}"] = base64.b64encode(bytes(r["grid"])).decode()
             return {"grids": grids, "x_positions": x_positions, "y_positions": y_positions, "extent": [-25, 25, 0, 120]}
     except Exception as e:
         print(f"[blocks batch cache error] {e}")

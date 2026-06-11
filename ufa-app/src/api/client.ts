@@ -57,6 +57,45 @@ export interface BatchPredictionResponse {
   extent: [number, number, number, number];
 }
 
+interface BatchPredictionResponseRaw {
+  grids: Record<string, string>;
+  x_positions: number[];
+  y_positions: number[];
+  extent: [number, number, number, number];
+}
+
+function float16ToFloat32(h: number): number {
+  const s = (h & 0x8000) >> 15
+  const e = (h & 0x7c00) >> 10
+  const f = h & 0x03ff
+  if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024)
+  if (e === 31) return f ? NaN : (s ? -Infinity : Infinity)
+  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024)
+}
+
+function decodeFloat16Grid(b64: string, rows: number, cols: number): number[][] {
+  const binary = atob(b64)
+  const result: number[][] = new Array(rows)
+  for (let r = 0; r < rows; r++) {
+    result[r] = new Array(cols)
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c
+      const lo = binary.charCodeAt(i * 2)
+      const hi = binary.charCodeAt(i * 2 + 1)
+      result[r][c] = float16ToFloat32(lo | (hi << 8))
+    }
+  }
+  return result
+}
+
+function decodeBatchResponse(raw: BatchPredictionResponseRaw, rows: number, cols: number): BatchPredictionResponse {
+  const grids: Record<string, number[][]> = {}
+  for (const [key, b64] of Object.entries(raw.grids)) {
+    grids[key] = decodeFloat16Grid(b64, rows, cols)
+  }
+  return { ...raw, grids }
+}
+
 export interface PlayerStats {
   total_throws: number;
   completion_pct: number;
@@ -387,13 +426,13 @@ export const api = {
   },
 
   getTurnoversBatch: async (): Promise<BatchPredictionResponse> => {
-    const response = await apiClient.get<BatchPredictionResponse>('/predict/turnovers/batch');
-    return response.data;
+    const response = await apiClient.get<BatchPredictionResponseRaw>('/predict/turnovers/batch');
+    return decodeBatchResponse(response.data, 120, 100);
   },
 
   getBlocksBatch: async (): Promise<BatchPredictionResponse> => {
-    const response = await apiClient.get<BatchPredictionResponse>('/predict/blocks/batch');
-    return response.data;
+    const response = await apiClient.get<BatchPredictionResponseRaw>('/predict/blocks/batch');
+    return decodeBatchResponse(response.data, 120, 100);
   },
 
   // Get relative density (turnover/completion ratio) prediction
@@ -571,10 +610,10 @@ export const api = {
     gridCellsY = 12,
     heatmapResolution = 30
   ): Promise<BatchPredictionResponse> => {
-    const response = await apiClient.get<BatchPredictionResponse>('/predict/throws/batch', {
+    const response = await apiClient.get<BatchPredictionResponseRaw>('/predict/throws/batch', {
       params: { player, grid_cells_x: gridCellsX, grid_cells_y: gridCellsY, heatmap_resolution: heatmapResolution },
     });
-    return response.data;
+    return decodeBatchResponse(response.data, 120, 100);
   },
 
   // Line synergy: all players on O-lines

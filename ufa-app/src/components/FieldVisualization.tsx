@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { GameEvent } from '../api/client'
 import '../styles/FieldVisualization.css'
 
@@ -8,22 +8,36 @@ interface FieldVisualizationProps {
   awayTeam: string
 }
 
-interface Possession {
-  team: string
-  startIndex: number
-  endIndex: number
-  events: GameEvent[]
-}
-
 interface Tooltip {
   text: string
   x: number
   y: number
 }
 
+const WALK_THROW_TYPES = new Set([18, 19, 20, 22, 23, 24])
+
 function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }: FieldVisualizationProps) {
-  const [selectedPossession, setSelectedPossession] = useState<number | null>(null)
+  const [walkThrowIdx, setWalkThrowIdx] = useState<number | null>(null)
   const [tooltip, setTooltip] = useState<Tooltip | null>(null)
+
+  const throwIndices = useMemo(
+    () => events.reduce<number[]>((acc, e, i) => { if (WALK_THROW_TYPES.has(e.event_type)) acc.push(i); return acc }, []),
+    [events]
+  )
+
+  // Reset walk mode when point changes
+  useEffect(() => { setWalkThrowIdx(null) }, [events])
+
+  useEffect(() => {
+    if (walkThrowIdx === null) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowRight') { e.preventDefault(); setWalkThrowIdx(p => p !== null ? Math.min(p + 1, throwIndices.length - 1) : null) }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); setWalkThrowIdx(p => p !== null ? Math.max(p - 1, 0) : null) }
+      else if (e.key === 'Escape') { setWalkThrowIdx(null) }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [walkThrowIdx, throwIndices.length])
   // Field dimensions based on actual data coordinate system
   const FIELD_X_MIN = -27
   const FIELD_X_MAX = 27
@@ -68,58 +82,6 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
   const EVENT_TYPE_STALL = 24
   const EVENT_TYPE_INJURY = 25
 
-  // Group events into possessions
-  const groupIntoPossessions = (): Possession[] => {
-    const possessions: Possession[] = []
-    let currentTeam: string | null = null
-    let possessionStart = 0
-
-    events.forEach((event, index) => {
-      // Skip events without team info
-      if (!event.team) return
-
-      // New possession if team changed
-      if (currentTeam !== null && event.team !== currentTeam) {
-        possessions.push({
-          team: currentTeam,
-          startIndex: possessionStart,
-          endIndex: index - 1,
-          events: events.slice(possessionStart, index)
-        })
-        possessionStart = index
-      }
-
-      currentTeam = event.team
-
-      // End possession on goal, throwaway, drop, callahan, or stall
-      if (event.event_type === EVENT_TYPE_GOAL ||
-          event.event_type === EVENT_TYPE_THROWAWAY ||
-          event.event_type === EVENT_TYPE_DROP ||
-          event.event_type === EVENT_TYPE_CALLAHAN ||
-          event.event_type === EVENT_TYPE_STALL) {
-        possessions.push({
-          team: currentTeam,
-          startIndex: possessionStart,
-          endIndex: index,
-          events: events.slice(possessionStart, index + 1)
-        })
-        possessionStart = index + 1
-        currentTeam = null
-      }
-    })
-
-    return possessions
-  }
-
-  const possessions = groupIntoPossessions()
-
-  // Find which possession an event belongs to
-  const getPossessionIndex = (eventIndex: number): number => {
-    return possessions.findIndex(p =>
-      eventIndex >= p.startIndex && eventIndex <= p.endIndex
-    )
-  }
-
   const renderThrowVector = (event: GameEvent, index: number) => {
     const throwerX = event.thrower_x
     const throwerY = event.thrower_y
@@ -129,25 +91,28 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
     const turnoverY = event.turnover_y
     const team = event.team || ''
 
-    // Determine which possession this event belongs to
-    const possessionIndex = getPossessionIndex(index)
-    const isSelected = selectedPossession === null || selectedPossession === possessionIndex
-    const opacity = isSelected ? 1 : 0.3
+    // Walk mode: determine opacity and whether to render
+    let opacity = 1
+    if (walkThrowIdx !== null) {
+      const throwPos = throwIndices.indexOf(index)
+      if (throwPos === -1) return null
+      if (throwPos > walkThrowIdx) return null
+      opacity = throwPos === walkThrowIdx ? 1 : 0.2
+    }
+
+    const sw = 2
+    const dr = 4
 
     // Determine if it's a turnover (drop or throwaway)
     const isDrop = event.event_type === EVENT_TYPE_DROP
     const isThrowaway = event.event_type === EVENT_TYPE_THROWAWAY
     const isGoal = event.event_type === EVENT_TYPE_GOAL
     const isTurnover = isDrop || isThrowaway || (turnoverX != null && turnoverY != null)
-    const color = isTurnover ? '#ef4444' : isGoal ? '#22c55e' : '#000000' // red for turnovers, green for goals, black for completions
+    const color = isTurnover ? '#ef4444' : isGoal ? '#22c55e' : '#000000'
 
-    // Click handler to select this possession
     const handleClick = () => {
-      if (selectedPossession === possessionIndex) {
-        setSelectedPossession(null) // Deselect if already selected
-      } else {
-        setSelectedPossession(possessionIndex)
-      }
+      const throwPos = throwIndices.indexOf(index)
+      if (throwPos !== -1) setWalkThrowIdx(walkThrowIdx === throwPos ? null : throwPos)
     }
 
     // If it's a completion or goal
@@ -166,115 +131,53 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
       const y2 = scaleY(normReceiverX)
 
       return (
-        <g
-          key={`throw-${index}`}
-          opacity={opacity}
-          onClick={handleClick}
-          style={{ cursor: 'pointer' }}
-        >
-          {/* Throw line */}
-          <line
-            x1={x1}
-            y1={y1}
-            x2={x2}
-            y2={y2}
-            stroke={color}
-            strokeWidth="2"
-            markerEnd={isGoal ? "url(#arrowhead-green)" : "url(#arrowhead)"}
-          />
-          {/* Thrower dot */}
-          <circle
-            cx={x1}
-            cy={y1}
-            r="4"
-            fill={color}
+        <g key={`throw-${index}`} opacity={opacity} onClick={handleClick} style={{ cursor: 'pointer' }}>
+          <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={sw}
+            markerEnd={isGoal ? "url(#arrowhead-green)" : "url(#arrowhead)"} />
+          <circle cx={x1} cy={y1} r={dr} fill={color}
             onMouseEnter={(e) => event.thrower && setTooltip({ text: event.thrower, x: e.clientX, y: e.clientY })}
             onMouseMove={(e) => event.thrower && setTooltip({ text: event.thrower, x: e.clientX, y: e.clientY })}
-            onMouseLeave={() => setTooltip(null)}
-          />
-          {/* Receiver dot */}
-          <circle
-            cx={x2}
-            cy={y2}
-            r="4"
-            fill={color}
+            onMouseLeave={() => setTooltip(null)} />
+          <circle cx={x2} cy={y2} r={dr} fill={color}
             onMouseEnter={(e) => event.receiver && setTooltip({ text: event.receiver, x: e.clientX, y: e.clientY })}
             onMouseMove={(e) => event.receiver && setTooltip({ text: event.receiver, x: e.clientX, y: e.clientY })}
-            onMouseLeave={() => setTooltip(null)}
-          />
+            onMouseLeave={() => setTooltip(null)} />
         </g>
       )
     }
 
     // Handle drops (type 20) - use receiver coordinates
     if (isDrop && throwerX != null && throwerY != null && receiverX != null && receiverY != null) {
-      // Normalize coordinates based on team direction
       const normThrowerX = normalizeX(throwerX, team)
       const normThrowerY = normalizeY(throwerY, team)
       const normReceiverX = normalizeX(receiverX, team)
       const normReceiverY = normalizeY(receiverY, team)
-
-      const x1 = scaleX(normThrowerY)
-      const y1 = scaleY(normThrowerX)
-      const x2 = scaleX(normReceiverY)
-      const y2 = scaleY(normReceiverX)
+      const x1 = scaleX(normThrowerY); const y1 = scaleY(normThrowerX)
+      const x2 = scaleX(normReceiverY); const y2 = scaleY(normReceiverX)
 
       return (
-        <g
-          key={`throw-${index}`}
-          opacity={opacity}
-          onClick={handleClick}
-          style={{ cursor: 'pointer' }}
-        >
-          {/* Throw line */}
-          <line
-            x1={x1}
-            y1={y1}
-            x2={x2}
-            y2={y2}
-            stroke={color}
-            strokeWidth="2"
-            strokeDasharray="5,5"
-            markerEnd="url(#arrowhead-red)"
-          />
-          {/* Thrower dot */}
-          <circle
-            cx={x1}
-            cy={y1}
-            r="4"
-            fill={color}
+        <g key={`throw-${index}`} opacity={opacity} onClick={handleClick} style={{ cursor: 'pointer' }}>
+          <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={sw} strokeDasharray="5,5" markerEnd="url(#arrowhead-red)" />
+          <circle cx={x1} cy={y1} r={dr} fill={color}
             onMouseEnter={(e) => event.thrower && setTooltip({ text: event.thrower, x: e.clientX, y: e.clientY })}
             onMouseMove={(e) => event.thrower && setTooltip({ text: event.thrower, x: e.clientX, y: e.clientY })}
-            onMouseLeave={() => setTooltip(null)}
-          />
-          {/* Drop location - red circle at receiver position */}
-          <circle
-            cx={x2}
-            cy={y2}
-            r="6"
-            fill={color}
-            stroke="#fff"
-            strokeWidth="1"
+            onMouseLeave={() => setTooltip(null)} />
+          <circle cx={x2} cy={y2} r={dr + 2} fill={color} stroke="#fff" strokeWidth="1"
             onMouseEnter={(e) => event.receiver && setTooltip({ text: `${event.receiver} (drop)`, x: e.clientX, y: e.clientY })}
             onMouseMove={(e) => event.receiver && setTooltip({ text: `${event.receiver} (drop)`, x: e.clientX, y: e.clientY })}
-            onMouseLeave={() => setTooltip(null)}
-          />
+            onMouseLeave={() => setTooltip(null)} />
         </g>
       )
     }
 
     // Handle throwaways (type 22) - use turnover coordinates
     if (isThrowaway && throwerX != null && throwerY != null && turnoverX != null && turnoverY != null) {
-      // Normalize coordinates based on team direction
       const normThrowerX = normalizeX(throwerX, team)
       const normThrowerY = normalizeY(throwerY, team)
       const normTurnoverX = normalizeX(turnoverX, team)
       const normTurnoverY = normalizeY(turnoverY, team)
-
-      const x1 = scaleX(normThrowerY)
-      const y1 = scaleY(normThrowerX)
-      const x2 = scaleX(normTurnoverY)
-      const y2 = scaleY(normTurnoverX)
+      const x1 = scaleX(normThrowerY); const y1 = scaleY(normThrowerX)
+      const x2 = scaleX(normTurnoverY); const y2 = scaleY(normTurnoverX)
 
       // Check for associated block (within 3 events, only injuries between)
       let blocker: string | undefined
@@ -306,139 +209,67 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
           onClick={handleClick}
           style={{ cursor: 'pointer' }}
         >
-          {/* Throw line */}
-          <line
-            x1={x1}
-            y1={y1}
-            x2={x2}
-            y2={y2}
-            stroke={color}
-            strokeWidth="2"
-            strokeDasharray="5,5"
-            markerEnd="url(#arrowhead-red)"
-          />
-          {/* Thrower dot */}
-          <circle
-            cx={x1}
-            cy={y1}
-            r="4"
-            fill={color}
+          <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={sw} strokeDasharray="5,5" markerEnd="url(#arrowhead-red)" />
+          <circle cx={x1} cy={y1} r={dr} fill={color}
             onMouseEnter={(e) => event.thrower && setTooltip({ text: event.thrower, x: e.clientX, y: e.clientY })}
             onMouseMove={(e) => event.thrower && setTooltip({ text: event.thrower, x: e.clientX, y: e.clientY })}
-            onMouseLeave={() => setTooltip(null)}
-          />
-          {/* Throwaway location - red square */}
-          <rect
-            x={x2 - 5}
-            y={y2 - 5}
-            width="10"
-            height="10"
-            fill={color}
-            stroke="#fff"
-            strokeWidth="1"
+            onMouseLeave={() => setTooltip(null)} />
+          <rect x={x2 - 5} y={y2 - 5} width="10" height="10" fill={color} stroke="#fff" strokeWidth="1"
             onMouseEnter={(e) => setTooltip({ text: throwawayTooltip, x: e.clientX, y: e.clientY })}
             onMouseMove={(e) => setTooltip({ text: throwawayTooltip, x: e.clientX, y: e.clientY })}
-            onMouseLeave={() => setTooltip(null)}
-          />
+            onMouseLeave={() => setTooltip(null)} />
         </g>
       )
     }
 
-    // Handle stalls (type 24) - turnover at thrower's position
+    // Handle stalls (type 24) - orange diamond at thrower position
     if (event.event_type === EVENT_TYPE_STALL && throwerX != null && throwerY != null) {
-      const normThrowerX = normalizeX(throwerX, team)
-      const normThrowerY = normalizeY(throwerY, team)
-      const x1 = scaleX(normThrowerY)
-      const y1 = scaleY(normThrowerX)
-
+      const x1 = scaleX(normalizeY(throwerY, team))
+      const y1 = scaleY(normalizeX(throwerX, team))
+      const sz = 6
       return (
-        <g
-          key={`throw-${index}`}
-          opacity={opacity}
-          onClick={handleClick}
-          style={{ cursor: 'pointer' }}
-        >
-          {/* Stall marker - orange diamond */}
-          <rect
-            x={x1 - 6}
-            y={y1 - 6}
-            width="12"
-            height="12"
-            fill="#f59e0b"
-            stroke="#fff"
-            strokeWidth="1"
+        <g key={`throw-${index}`} opacity={opacity} onClick={handleClick} style={{ cursor: 'pointer' }}>
+          <rect x={x1 - sz} y={y1 - sz} width={sz * 2} height={sz * 2} fill="#f59e0b" stroke="#fff" strokeWidth="1"
             transform={`rotate(45, ${x1}, ${y1})`}
             onMouseEnter={(e) => setTooltip({ text: `${event.thrower} (stall)`, x: e.clientX, y: e.clientY })}
             onMouseMove={(e) => setTooltip({ text: `${event.thrower} (stall)`, x: e.clientX, y: e.clientY })}
-            onMouseLeave={() => setTooltip(null)}
-          />
+            onMouseLeave={() => setTooltip(null)} />
         </g>
       )
     }
 
-    // Handle callahans (type 23) - purple line from thrower to previous receiver position (where disc was caught by defender)
+    // Handle callahans (type 23) - purple arrow from thrower to catch position
     if (event.event_type === EVENT_TYPE_CALLAHAN && throwerX != null && throwerY != null) {
-      const normThrowerX = normalizeX(throwerX, team)
-      const normThrowerY = normalizeY(throwerY, team)
-      const x1 = scaleX(normThrowerY)
-      const y1 = scaleY(normThrowerX)
+      const x1 = scaleX(normalizeY(throwerY, team))
+      const y1 = scaleY(normalizeX(throwerX, team))
+      const catchX = receiverX ?? turnoverX ?? null
+      const catchY = receiverY ?? turnoverY ?? null
 
-      // Look backward for previous completed throw to get where the disc was caught
-      let prevReceiverX: number | null = null
-      let prevReceiverY: number | null = null
-      for (let i = index - 1; i >= 0; i--) {
-        const prev = events[i]
-        if (prev.event_type === EVENT_TYPE_COMPLETION || prev.event_type === EVENT_TYPE_GOAL) {
-          prevReceiverX = prev.receiver_x ?? null
-          prevReceiverY = prev.receiver_y ?? null
-          break
-        }
-      }
-
-      // If we found a previous position, draw a line from there to the callahan throw point
-      if (prevReceiverX != null && prevReceiverY != null) {
-        const normPrevX = normalizeX(prevReceiverX, team)
-        const normPrevY = normalizeY(prevReceiverY, team)
-        const px = scaleX(normPrevY)
-        const py = scaleY(normPrevX)
-
+      if (catchX != null && catchY != null) {
+        const x2 = scaleX(normalizeY(catchY, team))
+        const y2 = scaleY(normalizeX(catchX, team))
         return (
-          <g
-            key={`throw-${index}`}
-            opacity={opacity}
-            onClick={handleClick}
-            style={{ cursor: 'pointer' }}
-          >
-            <line
-              x1={px} y1={py} x2={x1} y2={y1}
-              stroke="#a855f7"
-              strokeWidth="2"
-              strokeDasharray="5,5"
-              markerEnd="url(#arrowhead-purple)"
-            />
-            <circle cx={px} cy={py} r="4" fill="#a855f7"
+          <g key={`throw-${index}`} opacity={opacity} onClick={handleClick} style={{ cursor: 'pointer' }}>
+            <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#a855f7" strokeWidth={sw} strokeDasharray="5,5" markerEnd="url(#arrowhead-purple)" />
+            <circle cx={x1} cy={y1} r={dr} fill="#a855f7"
               onMouseEnter={(e) => setTooltip({ text: `${event.thrower} (callahan thrown)`, x: e.clientX, y: e.clientY })}
               onMouseMove={(e) => setTooltip({ text: `${event.thrower} (callahan thrown)`, x: e.clientX, y: e.clientY })}
-              onMouseLeave={() => setTooltip(null)}
-            />
-            {/* Callahan catch marker */}
-            <circle cx={x1} cy={y1} r="6" fill="#a855f7" stroke="#fff" strokeWidth="2"
+              onMouseLeave={() => setTooltip(null)} />
+            <circle cx={x2} cy={y2} r={dr + 2} fill="#a855f7" stroke="#fff" strokeWidth="2"
               onMouseEnter={(e) => setTooltip({ text: `Callahan caught (${event.defender || 'unknown'})`, x: e.clientX, y: e.clientY })}
               onMouseMove={(e) => setTooltip({ text: `Callahan caught (${event.defender || 'unknown'})`, x: e.clientX, y: e.clientY })}
-              onMouseLeave={() => setTooltip(null)}
-            />
+              onMouseLeave={() => setTooltip(null)} />
           </g>
         )
       }
 
-      // Fallback: just show marker at thrower position
+      // Fallback: dot at throw origin
       return (
         <g key={`throw-${index}`} opacity={opacity} onClick={handleClick} style={{ cursor: 'pointer' }}>
           <circle cx={x1} cy={y1} r="8" fill="#a855f7" stroke="#fff" strokeWidth="2"
             onMouseEnter={(e) => setTooltip({ text: `${event.thrower} (callahan thrown)`, x: e.clientX, y: e.clientY })}
             onMouseMove={(e) => setTooltip({ text: `${event.thrower} (callahan thrown)`, x: e.clientX, y: e.clientY })}
-            onMouseLeave={() => setTooltip(null)}
-          />
+            onMouseLeave={() => setTooltip(null)} />
         </g>
       )
     }
@@ -679,12 +510,14 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
         </div>
       </div>
 
-      {selectedPossession !== null && (
+      {walkThrowIdx !== null ? (
         <div className="selection-info">
-          <span>Possession {selectedPossession + 1} of {possessions.length} selected</span>
-          <button onClick={() => setSelectedPossession(null)} className="clear-btn">
-            Clear Selection
-          </button>
+          <span>Throw {walkThrowIdx + 1} of {throwIndices.length} — ← → to step, Esc to exit</span>
+          <button onClick={() => setWalkThrowIdx(null)} className="clear-btn">Exit</button>
+        </div>
+      ) : (
+        <div className="selection-info" style={{ color: '#666', fontSize: '12px' }}>
+          Click any throw to walk through the play
         </div>
       )}
 
