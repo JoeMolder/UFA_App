@@ -636,6 +636,42 @@ def get_game_events(game_id: str) -> List[Dict[str, Any]]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/games/{game_id}/roster")
+def get_game_roster(game_id: str) -> Dict[str, Any]:
+    """Players who appeared for each team in a game."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            lp.player_id,
+            p.full_name,
+            e.team,
+            COUNT(*) FILTER (WHERE lp.line_type = 'O') AS o_pts,
+            COUNT(*) FILTER (WHERE lp.line_type = 'D') AS d_pts
+        FROM line_players lp
+        JOIN events e ON e.event_id = lp.event_id
+        JOIN players p ON p.player_id = lp.player_id
+        WHERE e.game_id = %s
+        GROUP BY lp.player_id, p.full_name, e.team
+        ORDER BY e.team, (COUNT(*) FILTER (WHERE lp.line_type = 'O') + COUNT(*) FILTER (WHERE lp.line_type = 'D')) DESC
+    """, (game_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    by_team: Dict[str, list] = {}
+    for r in rows:
+        t = r["team"]
+        if t not in by_team:
+            by_team[t] = []
+        by_team[t].append({
+            "id": r["player_id"],
+            "name": r["full_name"],
+            "o_pts": int(r["o_pts"] or 0),
+            "d_pts": int(r["d_pts"] or 0),
+        })
+    return by_team
+
+
 @app.get("/stats/summary")
 def get_stats_summary() -> Dict[str, Any]:
     """Get overall database statistics."""
@@ -929,6 +965,34 @@ def get_team(team_id: str, year: Optional[int] = None):
         for r in roster_rows
     ]
 
+    # Past games for this team (filtered by year if provided)
+    games_year_filter = "AND g.year = %s" if year else ""
+    games_params = (team_id, team_id, year) if year else (team_id, team_id)
+    cur.execute(f"""
+        SELECT g.game_id, g.game_date, g.year, g.home_team_id, g.away_team_id,
+               g.home_score, g.away_score
+        FROM games g
+        WHERE (g.home_team_id = %s OR g.away_team_id = %s)
+          AND g.home_score IS NOT NULL AND g.away_score IS NOT NULL
+          {games_year_filter}
+        ORDER BY g.game_date DESC, g.game_id DESC
+    """, games_params)
+    games_rows = cur.fetchall()
+    past_games = [
+        {
+            "game_id":      r["game_id"],
+            "game_date":    str(r["game_date"]),
+            "year":         r["year"],
+            "home_team_id": r["home_team_id"],
+            "away_team_id": r["away_team_id"],
+            "home_score":   r["home_score"],
+            "away_score":   r["away_score"],
+            "won": (r["home_team_id"] == team_id and r["home_score"] > r["away_score"]) or
+                   (r["away_team_id"] == team_id and r["away_score"] > r["home_score"]),
+        }
+        for r in games_rows
+    ]
+
     cur.close()
     conn.close()
 
@@ -946,6 +1010,7 @@ def get_team(team_id: str, year: Optional[int] = None):
         "o_line_rate": round(o_line_rate, 4),
         "top_players": top_players,
         "roster": roster,
+        "past_games": past_games,
         "top_synergies": [
             {
                 "player1": {"id": r['p1'], "name": r['p1_name']},
@@ -2337,27 +2402,52 @@ def get_player(player_id: str, year: Optional[int] = None):
         """, params)
         b_rows = {r["year"]: int(r["blocks"]) for r in cur.fetchall()}
 
+        cur.execute(f"""
+            SELECT year, COUNT(*) AS drops
+            FROM events
+            WHERE receiver = %s AND event_type = 20 {yf_p}
+            GROUP BY year ORDER BY year
+        """, params)
+        d_rows = {r["year"]: int(r["drops"]) for r in cur.fetchall()}
+
+        cur.execute(f"""
+            SELECT e.year, COUNT(DISTINCT e.game_id) AS games
+            FROM line_players lp
+            JOIN events e ON e.event_id = lp.event_id
+            WHERE lp.player_id = %s {yf_ev}
+            GROUP BY e.year ORDER BY e.year
+        """, params)
+        g_rows = {r["year"]: int(r["games"]) for r in cur.fetchall()}
+
         all_yrs = sorted(set(list(t_rows.keys()) + list(c_rows.keys()) + list(p_rows.keys())))
         result = []
         for yr in all_yrs:
             t = t_rows.get(yr, {}); c = c_rows.get(yr, {}); p = p_rows.get(yr, {})
             ta = int(t.get("throw_attempts") or 0); comp = int(t.get("completions") or 0)
             ha = int(t.get("huck_attempts") or 0); hc = int(t.get("huck_completions") or 0)
+            goals = int(c.get("goals_caught") or 0)
+            assists = int(t.get("assists") or 0)
+            turnovers = int(t.get("turnovers") or 0)
+            blocks = b_rows.get(yr, 0)
+            drops = d_rows.get(yr, 0)
             result.append({
                 "year": yr, "team": t.get("team") or "",
+                "games": g_rows.get(yr, 0),
                 "o_possessions": int(p.get("o_possessions") or 0),
                 "d_possessions": int(p.get("d_possessions") or 0),
                 "throw_attempts": ta, "completions": comp,
                 "completion_pct": round(comp / ta, 4) if ta > 0 else 0.0,
-                "assists": int(t.get("assists") or 0),
-                "goals": int(c.get("goals_caught") or 0),
-                "turnovers": int(t.get("turnovers") or 0),
+                "assists": assists,
+                "goals": goals,
+                "turnovers": turnovers,
+                "drops": drops,
+                "plus_minus": goals + assists + blocks - drops - turnovers,
                 "huck_attempts": ha, "huck_completions": hc,
                 "huck_pct": round(hc / ha, 4) if ha > 0 else 0.0,
                 "avg_throw_dist": float(t.get("avg_throw_dist") or 0),
                 "avg_throw_depth": float(t.get("avg_throw_depth") or 0),
                 "catches": int(c.get("catches") or 0),
-                "blocks": b_rows.get(yr, 0),
+                "blocks": blocks,
                 "o_hold_rate": h_rows.get(yr, 0.0),
             })
         return result
@@ -2376,21 +2466,29 @@ def get_player(player_id: str, year: Optional[int] = None):
         weighted_dist = sum(s["avg_throw_dist"] * s["completions"] for s in ss if s["completions"] > 0)
         weighted_depth = sum(s["avg_throw_depth"] * s["completions"] for s in ss if s["completions"] > 0)
         weighted_hold = sum(s["o_hold_rate"] * s["o_possessions"] for s in ss if s["o_possessions"] > 0)
+        total_goals = sum(s["goals"] for s in ss)
+        total_assists = sum(s["assists"] for s in ss)
+        total_blocks = sum(s["blocks"] for s in ss)
+        total_drops = sum(s["drops"] for s in ss)
+        total_turnovers = sum(s["turnovers"] for s in ss)
         return {
             "year": 0, "team": "Career",
+            "games": sum(s["games"] for s in ss),
             "o_possessions": total_opp,
             "d_possessions": sum(s["d_possessions"] for s in ss),
             "throw_attempts": total_ta, "completions": total_comp,
             "completion_pct": round(total_comp / total_ta, 4) if total_ta > 0 else 0.0,
-            "assists": sum(s["assists"] for s in ss),
-            "goals": sum(s["goals"] for s in ss),
-            "turnovers": sum(s["turnovers"] for s in ss),
+            "assists": total_assists,
+            "goals": total_goals,
+            "turnovers": total_turnovers,
+            "drops": total_drops,
+            "plus_minus": total_goals + total_assists + total_blocks - total_drops - total_turnovers,
             "huck_attempts": total_ha, "huck_completions": total_hc,
             "huck_pct": round(total_hc / total_ha, 4) if total_ha > 0 else 0.0,
             "avg_throw_dist": round(weighted_dist / total_comp, 1) if total_comp > 0 else 0.0,
             "avg_throw_depth": round(weighted_depth / total_comp, 1) if total_comp > 0 else 0.0,
             "catches": sum(s["catches"] for s in ss),
-            "blocks": sum(s["blocks"] for s in ss),
+            "blocks": total_blocks,
             "o_hold_rate": round(weighted_hold / total_opp, 4) if total_opp > 0 else 0.0,
         }
 
@@ -2473,6 +2571,67 @@ def get_player(player_id: str, year: Optional[int] = None):
         "top_throwers": top_throwers,
         "synergy_partners": synergy_partners,
     }
+
+
+@app.get("/player/{player_id}/game-log")
+def get_player_game_log(player_id: str, year: Optional[int] = None):
+    """Per-game stats for a player, optionally filtered by year."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    yf = "AND e.year = %(yr)s" if year else ""
+    params: Dict[str, Any] = {"pid": player_id}
+    if year:
+        params["yr"] = year
+    cur.execute(f"""
+        SELECT
+            e.game_id,
+            g.game_date::text AS game_date,
+            g.home_team_id, g.away_team_id,
+            g.home_score, g.away_score,
+            MAX(CASE WHEN e.thrower = %(pid)s OR e.receiver = %(pid)s THEN e.team END) AS team,
+            COUNT(*) FILTER (WHERE e.thrower = %(pid)s AND e.event_type IN (18,19,20,22)) AS throw_attempts,
+            COUNT(*) FILTER (WHERE e.thrower = %(pid)s AND e.event_type IN (18,19)) AS completions,
+            COUNT(*) FILTER (WHERE e.thrower = %(pid)s AND e.event_type = 19) AS assists,
+            COUNT(*) FILTER (WHERE e.thrower = %(pid)s AND e.event_type IN (20,22)) AS turnovers,
+            COUNT(*) FILTER (WHERE e.receiver = %(pid)s AND e.event_type IN (18,19)) AS catches,
+            COUNT(*) FILTER (WHERE e.receiver = %(pid)s AND e.event_type = 19) AS goals,
+            COUNT(*) FILTER (WHERE e.receiver = %(pid)s AND e.event_type = 20) AS drops,
+            COUNT(*) FILTER (WHERE e.defender = %(pid)s AND e.event_type = 11) AS blocks
+        FROM events e
+        JOIN games g ON g.game_id = e.game_id
+        WHERE (e.thrower = %(pid)s OR e.receiver = %(pid)s OR e.defender = %(pid)s) {yf}
+        GROUP BY e.game_id, g.game_date, g.home_team_id, g.away_team_id, g.home_score, g.away_score
+        ORDER BY g.game_date, e.game_id
+    """, params)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    result = []
+    for r in rows:
+        goals = int(r["goals"] or 0)
+        assists = int(r["assists"] or 0)
+        blocks = int(r["blocks"] or 0)
+        drops = int(r["drops"] or 0)
+        turnovers = int(r["turnovers"] or 0)
+        result.append({
+            "game_id": r["game_id"],
+            "game_date": r["game_date"],
+            "home_team_id": r["home_team_id"],
+            "away_team_id": r["away_team_id"],
+            "home_score": r["home_score"],
+            "away_score": r["away_score"],
+            "team": r["team"] or "",
+            "throw_attempts": int(r["throw_attempts"] or 0),
+            "completions": int(r["completions"] or 0),
+            "assists": assists,
+            "turnovers": turnovers,
+            "catches": int(r["catches"] or 0),
+            "goals": goals,
+            "drops": drops,
+            "blocks": blocks,
+            "plus_minus": goals + assists + blocks - drops - turnovers,
+        })
+    return result
 
 
 @app.get("/player/{player_id}/throw-tendencies")

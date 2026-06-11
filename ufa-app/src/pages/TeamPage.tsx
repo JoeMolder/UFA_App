@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { api, TeamResponse } from '../api/client'
+import { api, TeamResponse, TeamGame } from '../api/client'
+import { teamLabel } from '../utils'
 
 
 function TeamPage() {
@@ -186,6 +187,64 @@ function TeamPage() {
           )}
         </div>
       </div>
+
+      {/* Past Games */}
+      {team.past_games.length > 0 && (() => {
+        const gamesByYear: Record<number, TeamGame[]> = {}
+        for (const g of team.past_games) {
+          if (!gamesByYear[g.year]) gamesByYear[g.year] = []
+          gamesByYear[g.year].push(g)
+        }
+        const years = Object.keys(gamesByYear).map(Number).sort((a, b) => b - a)
+        return (
+          <div style={{ marginBottom: '32px' }}>
+            <h2 style={{ marginBottom: '12px' }}>Game History</h2>
+            {years.map(yr => (
+              <div key={yr} style={{ marginBottom: '20px' }}>
+                <h3 style={{ fontSize: '15px', color: '#aaa', marginBottom: '8px' }}>{yr}</h3>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid #444', color: '#888' }}>
+                      <th style={{ textAlign: 'left', paddingBottom: '6px' }}>Date</th>
+                      <th style={{ textAlign: 'left', paddingBottom: '6px' }}>Opponent</th>
+                      <th style={{ textAlign: 'right', paddingBottom: '6px' }}>Score</th>
+                      <th style={{ textAlign: 'center', paddingBottom: '6px', width: '50px' }}>Result</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {gamesByYear[yr].map(g => {
+                      const isHome = g.home_team_id === team.team_id
+                      const opp = isHome ? g.away_team_id : g.home_team_id
+                      const teamScore = isHome ? g.home_score : g.away_score
+                      const oppScore = isHome ? g.away_score : g.home_score
+                      return (
+                        <tr key={g.game_id} style={{ borderBottom: '1px solid #2a2a3e', cursor: 'pointer' }}
+                            onClick={() => navigate(`/game/${g.game_id}`)}>
+                          <td style={{ padding: '6px 0', color: '#aaa' }}>{g.game_date}</td>
+                          <td style={{ padding: '6px 0', color: '#60a5fa' }}
+                              onClick={e => { e.stopPropagation(); navigate(`/team/${opp}`) }}>
+                            {teamLabel(opp)}
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '6px 0', fontVariantNumeric: 'tabular-nums' }}>
+                            {teamScore}–{oppScore}
+                          </td>
+                          <td style={{ textAlign: 'center', padding: '6px 0' }}>
+                            <span style={{
+                              padding: '1px 7px', borderRadius: '4px', fontSize: '11px', fontWeight: 700,
+                              backgroundColor: g.won ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)',
+                              color: g.won ? '#22c55e' : '#ef4444',
+                            }}>{g.won ? 'W' : 'L'}</span>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        )
+      })()}
 
       {/* Roster */}
       <div>

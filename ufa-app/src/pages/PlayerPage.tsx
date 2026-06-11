@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { api, PlayerResponse, PlayerSeason, ThrowTendencies, BlockTypes } from '../api/client'
-import { ThrowTendencyChart } from '../components/ThrowTendencyChart'
+import { api, PlayerResponse, PlayerSeason, PlayerGameLog, ThrowTendencies, BlockTypes } from '../api/client'
 import { teamLabel } from '../utils'
+import { ThrowTendencyChart } from '../components/ThrowTendencyChart'
 
 function pct(v: number) { return `${(v * 100).toFixed(1)}%` }
 function dist(v: number) { return v > 0 ? `${v.toFixed(1)}` : '—' }
@@ -13,16 +13,94 @@ const synergyColor = (delta: number) => {
   return '#f59e0b'
 }
 
-function StatsTable({ rows, career }: { rows: PlayerSeason[]; career: PlayerSeason }) {
+function GameLogRows({ games, colSpan, navigate }: { games: PlayerGameLog[]; colSpan: number; navigate: (p: string) => void }) {
+  return (
+    <tr>
+      <td colSpan={colSpan} style={{ padding: '0', backgroundColor: '#13131f' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: '12px', width: '100%' }}>
+          <thead>
+            <tr style={{ borderBottom: '1px solid #333', color: '#666' }}>
+              <th style={{ textAlign: 'left', padding: '5px 12px 5px 24px', whiteSpace: 'nowrap' }}>Date</th>
+              <th style={{ textAlign: 'left', padding: '5px 12px', whiteSpace: 'nowrap' }}>Opponent</th>
+              <th style={{ textAlign: 'right', padding: '5px 12px', whiteSpace: 'nowrap' }}>Score</th>
+              <th style={{ textAlign: 'right', padding: '5px 12px' }}>G</th>
+              <th style={{ textAlign: 'right', padding: '5px 12px' }}>A</th>
+              <th style={{ textAlign: 'right', padding: '5px 12px' }}>Blk</th>
+              <th style={{ textAlign: 'right', padding: '5px 12px' }}>TO</th>
+              <th style={{ textAlign: 'right', padding: '5px 12px' }}>Drops</th>
+              <th style={{ textAlign: 'right', padding: '5px 12px' }}>+/-</th>
+              <th style={{ textAlign: 'right', padding: '5px 12px' }}>Throws</th>
+              <th style={{ textAlign: 'right', padding: '5px 12px 5px 12px' }}>Comp%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {games.map(g => {
+              const isHome = g.home_team_id === g.team
+              const opp = isHome ? g.away_team_id : g.home_team_id
+              const teamScore = isHome ? g.home_score : g.away_score
+              const oppScore = isHome ? g.away_score : g.home_score
+              const won = teamScore > oppScore
+              const pm = g.plus_minus
+              const compPct = g.throw_attempts > 0 ? (g.completions / g.throw_attempts * 100).toFixed(0) + '%' : '—'
+              return (
+                <tr key={g.game_id} style={{ borderBottom: '1px solid #1e1e2e', cursor: 'pointer' }}
+                    onClick={() => navigate(`/game/${g.game_id}`)}>
+                  <td style={{ padding: '5px 12px 5px 24px', color: '#888', whiteSpace: 'nowrap' }}>{g.game_date}</td>
+                  <td style={{ padding: '5px 12px', color: '#60a5fa', whiteSpace: 'nowrap' }}
+                      onClick={e => { e.stopPropagation(); navigate(`/team/${opp}`) }}>
+                    {teamLabel(opp)}
+                  </td>
+                  <td style={{ padding: '5px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <span style={{ color: won ? '#22c55e' : '#ef4444', fontWeight: 600 }}>{won ? 'W' : 'L'}</span>
+                    {' '}{teamScore}–{oppScore}
+                  </td>
+                  <td style={{ padding: '5px 12px', textAlign: 'right' }}>{g.goals}</td>
+                  <td style={{ padding: '5px 12px', textAlign: 'right' }}>{g.assists}</td>
+                  <td style={{ padding: '5px 12px', textAlign: 'right' }}>{g.blocks}</td>
+                  <td style={{ padding: '5px 12px', textAlign: 'right' }}>{g.turnovers}</td>
+                  <td style={{ padding: '5px 12px', textAlign: 'right' }}>{g.drops}</td>
+                  <td style={{ padding: '5px 12px', textAlign: 'right', fontWeight: 600, color: pm > 0 ? '#22c55e' : pm < 0 ? '#ef4444' : '#aaa' }}>
+                    {pm > 0 ? `+${pm}` : pm}
+                  </td>
+                  <td style={{ padding: '5px 12px', textAlign: 'right', color: '#aaa' }}>{g.throw_attempts}</td>
+                  <td style={{ padding: '5px 12px', textAlign: 'right', color: '#aaa' }}>{compPct}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </td>
+    </tr>
+  )
+}
+
+function StatsTable({ rows, career, playerId }: { rows: PlayerSeason[]; career: PlayerSeason; playerId: string }) {
   const navigate = useNavigate()
+  const [expandedYear, setExpandedYear] = useState<number | null>(null)
+  const [gameLogCache, setGameLogCache] = useState<Map<number, PlayerGameLog[]>>(new Map())
+  const [loadingYear, setLoadingYear] = useState<number | null>(null)
+
+  const toggleYear = async (year: number) => {
+    if (expandedYear === year) { setExpandedYear(null); return }
+    setExpandedYear(year)
+    if (gameLogCache.has(year)) return
+    setLoadingYear(year)
+    try {
+      const data = await api.getPlayerGameLog(playerId, year)
+      setGameLogCache(prev => new Map(prev).set(year, data))
+    } catch { /* silent */ }
+    finally { setLoadingYear(null) }
+  }
+
   const cols: { key: string; label: string; fmt: (s: PlayerSeason) => React.ReactNode; bold: boolean }[] = [
     { key: 'year', label: 'Year', fmt: (s: PlayerSeason) => s.year === 0 ? 'Career' : String(s.year), bold: false },
     {
       key: 'team', label: 'Team', bold: false,
       fmt: (s: PlayerSeason) => s.team
-        ? <span style={{ cursor: 'pointer', color: '#60a5fa' }} onClick={() => navigate(`/team/${s.team}`)}>{teamLabel(s.team)}</span>
+        ? <span style={{ cursor: 'pointer', color: '#60a5fa' }} onClick={e => { e.stopPropagation(); navigate(`/team/${s.team}`) }}>{teamLabel(s.team)}</span>
         : '—',
     },
+    { key: 'games', label: 'G', fmt: (s: PlayerSeason) => String(s.games ?? 0), bold: false },
     { key: 'o_possessions', label: 'OPP', fmt: (s: PlayerSeason) => String(s.o_possessions), bold: false },
     { key: 'd_possessions', label: 'DPP', fmt: (s: PlayerSeason) => String(s.d_possessions), bold: false },
     { key: 'throw_attempts', label: 'Throws', fmt: (s: PlayerSeason) => String(s.throw_attempts), bold: false },
@@ -32,7 +110,12 @@ function StatsTable({ rows, career }: { rows: PlayerSeason[]; career: PlayerSeas
     { key: 'goals', label: 'Gls', fmt: (s: PlayerSeason) => String(s.goals), bold: false },
     { key: 'catches', label: 'Catches', fmt: (s: PlayerSeason) => String(s.catches), bold: false },
     { key: 'turnovers', label: 'TO', fmt: (s: PlayerSeason) => String(s.turnovers), bold: false },
+    { key: 'drops', label: 'Drops', fmt: (s: PlayerSeason) => String(s.drops ?? 0), bold: false },
     { key: 'blocks', label: 'Blks', fmt: (s: PlayerSeason) => String(s.blocks), bold: false },
+    { key: 'plus_minus', label: '+/-', fmt: (s: PlayerSeason) => {
+      const v = s.plus_minus ?? 0
+      return <span style={{ color: v > 0 ? '#22c55e' : v < 0 ? '#ef4444' : '#aaa', fontWeight: 600 }}>{v > 0 ? `+${v}` : String(v)}</span>
+    }, bold: false },
     { key: 'huck_attempts', label: 'Hucks', fmt: (s: PlayerSeason) => String(s.huck_attempts), bold: false },
     { key: 'huck_pct', label: 'Huck%', fmt: (s: PlayerSeason) => s.huck_attempts > 0 ? pct(s.huck_pct) : '—', bold: true },
     { key: 'avg_throw_dist', label: 'Avg Dist', fmt: (s: PlayerSeason) => dist(s.avg_throw_dist), bold: false },
@@ -58,13 +141,29 @@ function StatsTable({ rows, career }: { rows: PlayerSeason[]; career: PlayerSeas
         </thead>
         <tbody>
           {rows.map((s) => (
-            <tr key={s.year} style={{ borderBottom: '1px solid #2a2a3e' }}>
-              {cols.map((c) => (
-                <td key={c.key} style={c.key === 'year' || c.key === 'team' ? tdLeft : { ...tdStyle, fontWeight: c.bold ? 600 : 400 }}>
-                  {c.fmt(s)}
-                </td>
-              ))}
-            </tr>
+            <>
+              <tr
+                key={s.year}
+                style={{ borderBottom: expandedYear === s.year ? 'none' : '1px solid #2a2a3e', cursor: 'pointer' }}
+                onClick={() => toggleYear(s.year)}
+              >
+                {cols.map((c) => (
+                  <td key={c.key} style={c.key === 'year' || c.key === 'team' ? tdLeft : { ...tdStyle, fontWeight: c.bold ? 600 : 400 }}>
+                    {c.key === 'year' ? (
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                        {s.year}
+                        <span style={{ color: '#555', fontSize: '9px' }}>{expandedYear === s.year ? '▲' : '▼'}</span>
+                      </span>
+                    ) : c.fmt(s)}
+                  </td>
+                ))}
+              </tr>
+              {expandedYear === s.year && (
+                loadingYear === s.year
+                  ? <tr key={`${s.year}-loading`}><td colSpan={cols.length} style={{ padding: '8px 24px', color: '#666', fontSize: '12px', backgroundColor: '#13131f' }}>Loading...</td></tr>
+                  : <GameLogRows key={`${s.year}-games`} games={gameLogCache.get(s.year) ?? []} colSpan={cols.length} navigate={navigate} />
+              )}
+            </>
           ))}
           {/* Career row */}
           <tr style={{ borderTop: '2px solid #555', backgroundColor: '#1e1e2e' }}>
@@ -188,7 +287,7 @@ function PlayerPage() {
         {player.seasons.length === 0 ? (
           <p style={{ color: '#888', fontSize: '14px' }}>No data for this season.</p>
         ) : (
-          <StatsTable rows={player.seasons} career={player.career} />
+          <StatsTable rows={player.seasons} career={player.career} playerId={player.player.id} />
         )}
       </div>
 

@@ -16,7 +16,7 @@ interface Tooltip {
 
 const WALK_THROW_TYPES = new Set([18, 19, 20, 22, 23, 24])
 
-function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }: FieldVisualizationProps) {
+function FieldVisualization({ events, homeTeam, awayTeam }: FieldVisualizationProps) {
   const [walkThrowIdx, setWalkThrowIdx] = useState<number | null>(null)
   const [tooltip, setTooltip] = useState<Tooltip | null>(null)
 
@@ -510,12 +510,38 @@ function FieldVisualization({ events, homeTeam: _homeTeam, awayTeam: _awayTeam }
         </div>
       </div>
 
-      {walkThrowIdx !== null ? (
-        <div className="selection-info">
-          <span>Throw {walkThrowIdx + 1} of {throwIndices.length} — ← → to step, Esc to exit</span>
-          <button onClick={() => setWalkThrowIdx(null)} className="clear-btn">Exit</button>
-        </div>
-      ) : (
+      {walkThrowIdx !== null ? (() => {
+        const ev = events[throwIndices[walkThrowIdx]]
+        const teamName = ev?.team === homeTeam ? homeTeam : ev?.team === awayTeam ? awayTeam : ev?.team ?? '?'
+        const typeLabel =
+          ev?.event_type === EVENT_TYPE_GOAL ? 'Goal' :
+          ev?.event_type === EVENT_TYPE_THROWAWAY ? 'Throwaway' :
+          ev?.event_type === EVENT_TYPE_DROP ? 'Drop' :
+          ev?.event_type === EVENT_TYPE_CALLAHAN ? 'Callahan' :
+          ev?.event_type === EVENT_TYPE_STALL ? 'Stall' :
+          'Completion'
+        const thrower = ev?.thrower ?? null
+        const receiver =
+          ev?.event_type === EVENT_TYPE_CALLAHAN ? (ev?.defender ?? null) :
+          ev?.event_type === EVENT_TYPE_THROWAWAY ? null :
+          (ev?.receiver ?? null)
+        const blockerEv = ev?.event_type === EVENT_TYPE_THROWAWAY
+          ? events.slice(throwIndices[walkThrowIdx] + 1, throwIndices[walkThrowIdx] + 4).find(e => e.event_type === EVENT_TYPE_BLOCK)
+          : null
+        return (
+          <div className="selection-info">
+            <span style={{ fontWeight: 600, color: '#60a5fa' }}>{teamName}</span>
+            <span style={{ margin: '0 6px', color: '#666' }}>·</span>
+            <span style={{ color: typeLabel === 'Goal' ? '#22c55e' : typeLabel === 'Throwaway' || typeLabel === 'Drop' ? '#ef4444' : typeLabel === 'Callahan' ? '#a855f7' : '#ccc' }}>{typeLabel}</span>
+            {thrower && <><span style={{ margin: '0 6px', color: '#666' }}>·</span><span>{thrower}</span></>}
+            {receiver && <><span style={{ margin: '0 4px', color: '#666' }}>→</span><span>{receiver}</span></>}
+            {blockerEv?.defender && <><span style={{ margin: '0 6px', color: '#666' }}>·</span><span style={{ color: '#6366f1' }}>blk: {blockerEv.defender}</span></>}
+            <span style={{ margin: '0 10px', color: '#555' }}>|</span>
+            <span style={{ color: '#888', fontSize: '12px' }}>Throw {walkThrowIdx + 1}/{throwIndices.length} · ← → to step · Esc exit</span>
+            <button onClick={() => setWalkThrowIdx(null)} className="clear-btn" style={{ marginLeft: 8 }}>Exit</button>
+          </div>
+        )
+      })() : (
         <div className="selection-info" style={{ color: '#666', fontSize: '12px' }}>
           Click any throw to walk through the play
         </div>

@@ -256,6 +256,17 @@ export interface RosterPlayer {
   d_appearances: number;
 }
 
+export interface TeamGame {
+  game_id: string;
+  game_date: string;
+  year: number;
+  home_team_id: string;
+  away_team_id: string;
+  home_score: number;
+  away_score: number;
+  won: boolean;
+}
+
 export interface TeamResponse {
   team_id: string;
   team_name: string;
@@ -266,6 +277,7 @@ export interface TeamResponse {
   o_line_rate: number;
   top_players: TeamPlayer[];
   roster: RosterPlayer[];
+  past_games: TeamGame[];
   top_synergies: TeamSynergyPair[];
 }
 
@@ -277,6 +289,7 @@ export interface CompletionPredictResponse {
 export interface PlayerSeason {
   year: number;
   team: string;
+  games: number;
   o_possessions: number;
   d_possessions: number;
   throw_attempts: number;
@@ -285,6 +298,8 @@ export interface PlayerSeason {
   assists: number;
   goals: number;
   turnovers: number;
+  drops: number;
+  plus_minus: number;
   huck_attempts: number;
   huck_completions: number;
   huck_pct: number;
@@ -293,6 +308,25 @@ export interface PlayerSeason {
   catches: number;
   blocks: number;
   o_hold_rate: number;
+}
+
+export interface PlayerGameLog {
+  game_id: string;
+  game_date: string;
+  home_team_id: string;
+  away_team_id: string;
+  home_score: number;
+  away_score: number;
+  team: string;
+  throw_attempts: number;
+  completions: number;
+  assists: number;
+  turnovers: number;
+  catches: number;
+  goals: number;
+  drops: number;
+  blocks: number;
+  plus_minus: number;
 }
 
 export interface PlayerConnection {
@@ -359,6 +393,12 @@ export const api = {
   // Get game events
   getGameEvents: async (gameId: string): Promise<GameEvent[]> => {
     const response = await apiClient.get<GameEvent[]>(`/games/${gameId}/events`);
+    return response.data;
+  },
+
+  // Get game roster (players per team)
+  getGameRoster: async (gameId: string): Promise<Record<string, { id: string; name: string; o_pts: number; d_pts: number }[]>> => {
+    const response = await apiClient.get(`/games/${gameId}/roster`);
     return response.data;
   },
 
@@ -653,6 +693,13 @@ export const api = {
     const params: Record<string, number> = {};
     if (year) params.year = year;
     const response = await apiClient.get<BlockTypes>(`/player/${playerId}/block-types`, { params });
+    return response.data;
+  },
+
+  getPlayerGameLog: async (playerId: string, year?: number): Promise<PlayerGameLog[]> => {
+    const params: Record<string, number> = {};
+    if (year) params.year = year;
+    const response = await apiClient.get<PlayerGameLog[]>(`/player/${playerId}/game-log`, { params });
     return response.data;
   },
 };

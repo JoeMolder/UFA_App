@@ -101,8 +101,7 @@ function Home() {
           { label: 'Throw Prediction', desc: 'Heatmap of predicted throw success rates across the field', path: '/predict', icon: '🎯', color: '#0ea5e9' },
           { label: 'EPV Heatmap', desc: 'Expected possession value across field positions', path: '/epv', icon: '📊', color: '#f97316' },
           { label: 'Turnover Heatmap', desc: 'Spatial analysis of where turnovers occur and are predicted', path: '/turnovers', icon: '🔴', color: '#ef4444' },
-          { label: 'Completion %', desc: 'ML-predicted completion probability by throw location and depth', path: '/completion', icon: '✅', color: '#22c55e' },
-          { label: 'Line Synergy', desc: 'Pair synergy analysis and lineup scoring prediction', path: '/line-synergy', icon: '🤝', color: '#6366f1' },
+{ label: 'Line Synergy', desc: 'Pair synergy analysis and lineup scoring prediction', path: '/line-synergy', icon: '🤝', color: '#6366f1' },
           { label: 'Player Embeddings', desc: 'Visualize player similarity and clustering in 2D space', path: '/embeddings', icon: '🧬', color: '#8b5cf6' },
         ].map(({ label, desc, path, icon, color }) => (
           <div
