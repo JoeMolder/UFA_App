@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { api, BatchPredictionResponse } from '../api/client'
+import { api, BatchPredictionResponse, decodeFloat16Grid } from '../api/client'
 
 // Hot colormap: black → red → yellow → white
 function hotColor(t: number): [number, number, number, number] {
@@ -12,6 +12,7 @@ function hotColor(t: number): [number, number, number, number] {
 
 function TurnoverHeatmap() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const gridCache = useRef<Map<string, number[][]>>(new Map())
   const [throwerPos, setThrowerPos] = useState({ x: 0, y: 60 })
   const [batchData, setBatchData] = useState<BatchPredictionResponse | null>(null)
   const [currentGrid, setCurrentGrid] = useState<number[][] | null>(null)
@@ -80,7 +81,13 @@ function TurnoverHeatmap() {
         if (dist < bestYDist) { bestYDist = dist; bestYi = i }
       }
 
-      return grids[`${bestXi},${bestYi}`] || null
+      const key = `${bestXi},${bestYi}`
+      const b64 = grids[key]
+      if (!b64) return null
+      if (gridCache.current.has(key)) return gridCache.current.get(key)!
+      const decoded = decodeFloat16Grid(b64, 120, 100)
+      gridCache.current.set(key, decoded)
+      return decoded
     },
     [batchData]
   )
@@ -133,10 +140,12 @@ function TurnoverHeatmap() {
         const result = await api.getTurnoversBatch()
         if (cancelled) return
         setLoadingProgress(100)
+        gridCache.current.clear()
         setBatchData(result)
         const midXi = Math.floor(result.x_positions.length / 2)
         const midYi = Math.floor(result.y_positions.length / 2)
-        setCurrentGrid(result.grids[`${midXi},${midYi}`] || null)
+        const b64 = result.grids[`${midXi},${midYi}`]
+        setCurrentGrid(b64 ? decodeFloat16Grid(b64, 120, 100) : null)
       } catch (err) {
         console.error('Turnover batch loading failed:', err)
       } finally {

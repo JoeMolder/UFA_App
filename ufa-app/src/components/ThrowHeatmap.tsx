@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { api, BatchPredictionResponse, PlayerOption } from '../api/client'
+import { api, BatchPredictionResponse, PlayerOption, decodeFloat16Grid } from '../api/client'
 
 interface ThrowHeatmapProps {
   players: PlayerOption[]
@@ -16,6 +16,7 @@ function hotColor(t: number): [number, number, number, number] {
 
 function ThrowHeatmap({ players }: ThrowHeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const gridCache = useRef<Map<string, number[][]>>(new Map())
   const [selectedPlayer, setSelectedPlayer] = useState(players[0]?.id || '')
   const [throwerPos, setThrowerPos] = useState({ x: 0, y: 60 })
   const [batchData, setBatchData] = useState<BatchPredictionResponse | null>(null)
@@ -95,7 +96,12 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
       }
 
       const key = `${bestXi},${bestYi}`
-      return grids[key] || null
+      const b64 = grids[key]
+      if (!b64) return null
+      if (gridCache.current.has(key)) return gridCache.current.get(key)!
+      const decoded = decodeFloat16Grid(b64, 120, 100)
+      gridCache.current.set(key, decoded)
+      return decoded
     },
     [batchData]
   )
@@ -169,12 +175,13 @@ function ThrowHeatmap({ players }: ThrowHeatmapProps) {
         const result = await api.predictThrowsBatch(selectedPlayer)
         if (cancelled) return
 
+        gridCache.current.clear()
         setBatchData(result)
-        // Pick the grid closest to center of field
         const nX = result.x_positions.length
         const nY = result.y_positions.length
         const centerKey = `${Math.floor(nX / 2)},${Math.floor(nY / 2)}`
-        setCurrentGrid(result.grids[centerKey] || null)
+        const b64 = result.grids[centerKey]
+        setCurrentGrid(b64 ? decodeFloat16Grid(b64, 120, 100) : null)
         setLoadingProgress(100)
       } catch (err) {
         console.error('Prediction loading failed:', err)
