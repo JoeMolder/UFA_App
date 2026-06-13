@@ -526,7 +526,7 @@ function FieldVisualization({ events, homeTeam, awayTeam }: FieldVisualizationPr
           ev?.event_type === EVENT_TYPE_THROWAWAY ? null :
           (ev?.receiver ?? null)
         const blockerEv = ev?.event_type === EVENT_TYPE_THROWAWAY
-          ? events.slice(throwIndices[walkThrowIdx] + 1, throwIndices[walkThrowIdx] + 4).find(e => e.event_type === EVENT_TYPE_BLOCK)
+          ? events.slice(throwIndices[walkThrowIdx] + 1, throwIndices[walkThrowIdx] + 4).find(e => e.event_type === EVENT_TYPE_BLOCK && e.team !== ev.team)
           : null
         return (
           <div className="selection-info">
