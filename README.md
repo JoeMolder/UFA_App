@@ -14,7 +14,7 @@ Built by [Joe Molder](https://github.com/JoeMolder)
 
 ## About
 
-The UFA is a professional ultimate frisbee league with rich play-by-play data and no public analytics tooling. I built this at the intersection of a genuine interest in the sport and a goal of demonstrating full-stack ML engineering in a domain where the tooling doesn't yet exist. The result is a production-deployed platform covering 762 games and ~560,000 events across five seasons (2021–2025), combining a custom data pipeline, relational database, REST API, and a suite of machine learning models built from scratch.
+The UFA is a professional ultimate frisbee league with rich play-by-play data and no public analytics tooling. I built this at the intersection of a genuine interest in the sport and a goal of demonstrating full-stack ML engineering in a domain where the tooling doesn't yet exist. The result is a production-deployed platform covering 762 games and ~560,000 events across six seasons (2021–2026), combining a custom data pipeline, relational database, REST API, and a suite of machine learning models built from scratch.
 
 ---
 

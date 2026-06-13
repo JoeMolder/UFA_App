@@ -93,7 +93,7 @@ function Home() {
     <div className="app">
       <header style={{ textAlign: 'center' }}>
         <h1>UFA Analytics</h1>
-        <p>Ultimate Frisbee Association · 2021–2025</p>
+        <p>Ultimate Frisbee Association · 2021–2026</p>
       </header>
 
       <div className="feature-grid">
