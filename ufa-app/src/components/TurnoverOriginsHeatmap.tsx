@@ -83,6 +83,7 @@ function TurnoverOriginsHeatmap() {
     const fetchData = async () => {
       try {
         setLoading(true)
+        setError(null)
         const player = selectedPlayer === ALL_PLAYERS ? undefined : selectedPlayer
         const team = selectedTeam === ALL_PLAYERS ? undefined : selectedTeam
         const opponent = selectedOpponent === ALL_PLAYERS ? undefined : selectedOpponent
@@ -150,6 +151,14 @@ function TurnoverOriginsHeatmap() {
       for (let c = 0; c < cols; c++) {
         if (grid[r][c] > maxVal) maxVal = grid[r][c]
       }
+    }
+
+    if (data.total_throws === 0) {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.7)'
+      ctx.font = 'bold 16px monospace'
+      ctx.textAlign = 'center'
+      ctx.fillText('No data for this filter combination', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2)
+      return
     }
 
     if (maxVal > 0) {

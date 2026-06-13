@@ -1,21 +1,21 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { api, EPVResponse } from '../api/client'
 
-// Blue → Yellow → Red colormap (cold = low scoring chance, warm = high)
+// Green → Yellow → Red colormap (low EPV = green, high EPV = red)
 function epvColor(t: number): [number, number, number, number] {
   let r: number, g: number, b: number
   if (t < 0.5) {
     const s = t * 2
     r = Math.floor(s * 255)
-    g = Math.floor(s * 180)
-    b = Math.floor(255 * (1 - s * 0.8))
+    g = 200
+    b = 30
   } else {
     const s = (t - 0.5) * 2
     r = 255
-    g = Math.floor(180 * (1 - s))
-    b = 0
+    g = Math.floor(200 * (1 - s))
+    b = 30
   }
-  const a = Math.floor(t * 140 + 60)
+  const a = Math.floor(t * 180 + 40)
   return [r, g, b, a]
 }
 
@@ -115,31 +115,46 @@ function EPVHeatmap() {
     const nRows = grid.length      // 60
     const nCols = grid[0].length   // 25
 
-    // Find actual min/max for normalization
+    // Normalize excluding the scoring endzone (y≥100) — disc there means goal already scored
     let vmin = Infinity, vmax = -Infinity
-    for (const row of grid) {
-      for (const v of row) {
+    for (let row = 0; row < nRows; row++) {
+      const fieldY = FIELD_Y_MIN + (row / nRows) * (FIELD_Y_MAX - FIELD_Y_MIN)
+      if (fieldY >= 100) continue
+      for (const v of grid[row]) {
         if (v < vmin) vmin = v
         if (v > vmax) vmax = v
       }
     }
+    if (vmin === Infinity) { vmin = 0; vmax = 1 }
     const vRange = vmax - vmin || 1
 
-    // Draw each grid cell as a rectangle on the canvas
-    // grid[row][col]: row=0 is y=0 (own endzone), row=59 is y=120 (scoring end)
-    //                 col=0 is x=-25 (left sideline), col=24 is x=25 (right sideline)
+    // Draw heatmap: green field background with EPV overlay, end zones left plain green
+    const green = { r: 10, g: 61, b: 10 }
     const imageData = ctx.createImageData(CANVAS_WIDTH, CANVAS_HEIGHT)
 
+    // Fill the field area with green
+    for (let py = Math.round(fieldTop); py < Math.round(fieldBottom); py++) {
+      for (let px = Math.round(fieldLeft); px < Math.round(fieldRight); px++) {
+        const idx = (py * CANVAS_WIDTH + px) * 4
+        imageData.data[idx]     = green.r
+        imageData.data[idx + 1] = green.g
+        imageData.data[idx + 2] = green.b
+        imageData.data[idx + 3] = 255
+      }
+    }
+
+    // Alpha-blend EPV cells over green, skipping scoring endzone
     for (let row = 0; row < nRows; row++) {
+      const fieldY = FIELD_Y_MIN + (row / nRows) * (FIELD_Y_MAX - FIELD_Y_MIN)
+      if (fieldY >= 100) continue
+
       for (let col = 0; col < nCols; col++) {
         const val = grid[row][col]
         const t = (val - vmin) / vRange
-        const [r, g, b, a] = epvColor(t)
+        const [sr, sg, sb, saRaw] = epvColor(t)
+        const sa = saRaw / 255
 
-        // row → fieldY (0 to 120), col → fieldX (-25 to 25)
-        const fieldY = FIELD_Y_MIN + (row / nRows) * (FIELD_Y_MAX - FIELD_Y_MIN)
         const fieldX = FIELD_X_MIN + (col / nCols) * (FIELD_X_MAX - FIELD_X_MIN)
-
         const cx0 = Math.round(fieldToCanvasX(fieldY))
         const cy0 = Math.round(fieldToCanvasY(fieldX))
         const cx1 = Math.round(fieldToCanvasX(fieldY + (FIELD_Y_MAX - FIELD_Y_MIN) / nRows))
@@ -148,10 +163,10 @@ function EPVHeatmap() {
         for (let py = Math.max(0, cy0); py < Math.min(CANVAS_HEIGHT, cy1); py++) {
           for (let px = Math.max(0, cx0); px < Math.min(CANVAS_WIDTH, cx1); px++) {
             const idx = (py * CANVAS_WIDTH + px) * 4
-            imageData.data[idx] = r
-            imageData.data[idx + 1] = g
-            imageData.data[idx + 2] = b
-            imageData.data[idx + 3] = a
+            imageData.data[idx]     = Math.round(sa * sr + (1 - sa) * green.r)
+            imageData.data[idx + 1] = Math.round(sa * sg + (1 - sa) * green.g)
+            imageData.data[idx + 2] = Math.round(sa * sb + (1 - sa) * green.b)
+            imageData.data[idx + 3] = 255
           }
         }
       }
@@ -226,7 +241,11 @@ function EPVHeatmap() {
 
     // Stats overlay
     let sumVal = 0, count = 0
-    for (const row of grid) for (const v of row) { sumVal += v; count++ }
+    for (let row = 0; row < grid.length; row++) {
+      const fieldY = FIELD_Y_MIN + (row / grid.length) * (FIELD_Y_MAX - FIELD_Y_MIN)
+      if (fieldY >= 100) continue
+      for (const v of grid[row]) { sumVal += v; count++ }
+    }
     const avgEPV = count > 0 ? sumVal / count : 0
     ctx.fillStyle = 'rgba(0,0,0,0.55)'
     ctx.fillRect(fieldLeft + 4, fieldTop + 4, 220, 42)
@@ -388,7 +407,7 @@ function EPVHeatmap() {
             style={{
               width: '100%',
               maxWidth: `${CANVAS_WIDTH}px`,
-              background: '#1a1a2e',
+              background: '#111',
               borderRadius: '6px',
               border: '1px solid #333',
               display: 'block',

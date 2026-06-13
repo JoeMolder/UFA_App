@@ -1587,7 +1587,12 @@ def get_turnover_origins(
         conn.close()
 
         if not all_throw_rows:
-            raise HTTPException(status_code=404, detail="No throw data found")
+            return {
+                "grid": np.zeros((grid_y, grid_x)).tolist(),
+                "total_throws": 0,
+                "total_turnovers": 0,
+                "extent": [-25, 25, 0, 120],
+            }
 
         x_edges = np.linspace(-25, 25, grid_x + 1)
         y_edges = np.linspace(0, 120, grid_y + 1)
@@ -2640,19 +2645,22 @@ def get_player_throw_tendencies(player_id: str, year: Optional[int] = None):
     conn = get_db_connection()
     cur = conn.cursor()
 
-    yf = "AND year = %s" if year else ""
+    yf = "AND e.year = %s" if year else ""
     params = (player_id, year) if year else (player_id,)
 
     cur.execute(f"""
         SELECT
-            receiver_x - thrower_x AS dx,
-            receiver_y - thrower_y AS dy,
+            CASE WHEN e.team = g.home_team_id THEN receiver_x - thrower_x
+                 ELSE thrower_x - receiver_x END AS dx,
+            CASE WHEN e.team = g.home_team_id THEN receiver_y - thrower_y
+                 ELSE thrower_y - receiver_y END AS dy,
             SQRT(POWER(receiver_x - thrower_x, 2) + POWER(receiver_y - thrower_y, 2)) AS dist
-        FROM events
-        WHERE thrower = %s
-          AND event_type IN (18, 19)
-          AND thrower_x IS NOT NULL AND thrower_y IS NOT NULL
-          AND receiver_x IS NOT NULL AND receiver_y IS NOT NULL
+        FROM events e
+        JOIN games g ON g.game_id = e.game_id
+        WHERE e.thrower = %s
+          AND e.event_type IN (18, 19)
+          AND e.thrower_x IS NOT NULL AND e.thrower_y IS NOT NULL
+          AND e.receiver_x IS NOT NULL AND e.receiver_y IS NOT NULL
           {yf}
     """, params)
     rows = cur.fetchall()
