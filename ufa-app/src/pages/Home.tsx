@@ -91,7 +91,7 @@ function Home() {
 
   return (
     <div className="app">
-      <header>
+      <header style={{ textAlign: 'center' }}>
         <h1>UFA Analytics</h1>
         <p>Ultimate Frisbee Association · 2021–2025</p>
       </header>
@@ -206,7 +206,6 @@ function Home() {
                   <span className="score">{game.home_score}</span>
                 </div>
               </div>
-              <div className="game-id">{game.game_id}</div>
             </div>
           ))}
         </div>

@@ -5,6 +5,7 @@ it with all game data for 2021-2025.
 """
 
 import getpass
+import os
 import random
 import time
 from typing import Dict, List, Optional, Tuple
@@ -41,6 +42,9 @@ FIELD_Y_MIN, FIELD_Y_MAX =   0.0, 110.0
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def get_connection():
+    url = os.environ.get('DATABASE_URL')
+    if url:
+        return psycopg2.connect(url, sslmode='require')
     return psycopg2.connect(**DB_CONFIG)
 
 
@@ -447,14 +451,23 @@ def insert_game_data(game_id, events, home_team_id, away_team_id, home_score, aw
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def main():
-    print(f"\nConnecting as user: '{DB_CONFIG['user']}'")
+    import sys
+    reset = '--reset' in sys.argv  # only wipe + recreate schema if explicitly requested
 
-    print("\n[1/5] Creating database...")
-    create_database()
+    on_railway = bool(os.environ.get('DATABASE_URL'))
+    print(f"\nTarget: {'Railway' if on_railway else 'local'}")
 
-    print("\n[2/5] Creating schema...")
-    create_schema()
-    print("  Schema created.")
+    if reset:
+        if on_railway:
+            print("ERROR: --reset not allowed on Railway. Aborting.")
+            sys.exit(1)
+        print("\n[1/5] Creating database...")
+        create_database()
+        print("\n[2/5] Creating schema...")
+        create_schema()
+        print("  Schema created.")
+    else:
+        print("\nRunning in incremental mode (SKIP_EXISTING=True, schema untouched).")
 
     years_str = ",".join(str(y) for y in YEARS)
 

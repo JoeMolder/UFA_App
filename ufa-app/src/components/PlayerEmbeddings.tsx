@@ -33,6 +33,14 @@ const CLUSTER_COLORS = [
 ]
 const NOISE_COLOR = '#555'
 
+// Archetypes derived from cluster mean stats (completion%, huck rate, avg throw dist)
+const CLUSTER_LABELS: Record<number, string> = {
+  0: 'Deep Thrower',   // 91.5% comp, 10.4% hucks, 18.4yd avg
+  1: 'All-Around',     // 94.0% comp, 6.3% hucks, 16.3yd avg
+  2: 'Handler',        // 93.8% comp, 5.8% hucks, 15.4yd avg
+  3: 'Reset Handler',  // 96.0% comp, 2.8% hucks, 13.9yd avg
+}
+
 function getClusterColor(cluster: number): string {
   if (cluster < 0) return NOISE_COLOR
   return CLUSTER_COLORS[cluster % CLUSTER_COLORS.length]
@@ -249,6 +257,19 @@ const getNeighbors = useCallback(
           onClick={() => setPinnedPlayer(null)}
         />
 
+        {/* Cluster legend */}
+        <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', marginTop: '10px' }}>
+          {Object.entries(CLUSTER_LABELS).map(([c, label]) => (
+            <div key={c} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: CLUSTER_COLORS[Number(c)], flexShrink: 0 }} />
+              <span style={{ color: '#ccc', fontSize: '12px' }}>{label}</span>
+            </div>
+          ))}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: NOISE_COLOR, flexShrink: 0 }} />
+            <span style={{ color: '#ccc', fontSize: '12px' }}>Unclustered</span>
+          </div>
+        </div>
       </div>
 
       {/* Side panel — player stats */}
@@ -271,7 +292,7 @@ const getNeighbors = useCallback(
               <span style={{ color: '#888', marginLeft: '8px', fontWeight: 'normal', fontSize: '12px' }}>
                 {(() => {
                   const p = data.find((d) => d.name === displayedPlayer)
-                  return p && p.cluster >= 0 ? `C${p.cluster}` : 'noise'
+                  return p && p.cluster >= 0 ? (CLUSTER_LABELS[p.cluster] ?? `C${p.cluster}`) : 'unclustered'
                 })()}
               </span>
             </div>
