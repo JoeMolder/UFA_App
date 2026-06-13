@@ -2,7 +2,9 @@ name: Weekly UFA Data Ingest
 
 on:
   schedule:
-    - cron: '0 8 * * 1'  # Every Monday at 8am UTC
+    - cron: '0 8 * * 6'  # Saturday 4am EDT (UTC-4)
+    - cron: '0 8 * * 0'  # Sunday 4am EDT (UTC-4)
+    - cron: '0 8 * * 1'  # Monday 4am EDT (UTC-4)
   workflow_dispatch:       # Allow manual trigger from GitHub UI
 
 jobs:
