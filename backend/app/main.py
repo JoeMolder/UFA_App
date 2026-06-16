@@ -358,8 +358,8 @@ try:
                 THEN receiver_y - thrower_y
             END) as avg_throw_depth,
             SUM(CASE
-                WHEN event_type IN (18, 19) AND receiver_y IS NOT NULL
-                    AND ABS(receiver_y - thrower_y) > 30
+                WHEN event_type IN (18, 19) AND receiver_x IS NOT NULL AND receiver_y IS NOT NULL
+                    AND SQRT(POWER(receiver_x - thrower_x, 2) + POWER(receiver_y - thrower_y, 2)) >= 40
                 THEN 1 ELSE 0
             END)::float / NULLIF(SUM(CASE WHEN event_type IN (18, 19) THEN 1 ELSE 0 END), 0) as huck_rate,
             AVG(CASE
@@ -2331,11 +2331,12 @@ def get_player(player_id: str, year: Optional[int] = None):
                 COUNT(*) FILTER (WHERE event_type IN (18,19,20,22)) AS throw_attempts,
                 COUNT(*) FILTER (WHERE event_type IN (18,19)) AS completions,
                 COUNT(*) FILTER (WHERE event_type = 19) AS assists,
-                COUNT(*) FILTER (WHERE event_type IN (20,22)) AS turnovers,
-                COUNT(*) FILTER (WHERE event_type IN (18,19) AND receiver_y IS NOT NULL
-                    AND ABS(receiver_y - thrower_y) > 30) AS huck_completions,
-                COUNT(*) FILTER (WHERE event_type IN (18,19,20) AND receiver_y IS NOT NULL
-                    AND ABS(receiver_y - thrower_y) > 30) AS huck_attempts,
+                COUNT(*) FILTER (WHERE event_type = 22) AS turnovers,
+                COUNT(*) FILTER (WHERE event_type IN (18,19,20) AND receiver_x IS NOT NULL AND receiver_y IS NOT NULL
+                    AND SQRT(POWER(receiver_x - thrower_x, 2) + POWER(receiver_y - thrower_y, 2)) >= 40) AS huck_completions,
+                COUNT(*) FILTER (WHERE event_type IN (18,19,20,22)
+                    AND COALESCE(receiver_x, turnover_x) IS NOT NULL AND COALESCE(receiver_y, turnover_y) IS NOT NULL
+                    AND SQRT(POWER(COALESCE(receiver_x, turnover_x) - thrower_x, 2) + POWER(COALESCE(receiver_y, turnover_y) - thrower_y, 2)) >= 40) AS huck_attempts,
                 ROUND(AVG(CASE WHEN event_type IN (18,19) AND receiver_x IS NOT NULL
                     THEN SQRT(POWER(receiver_x-thrower_x,2)+POWER(receiver_y-thrower_y,2)) END)::numeric, 1) AS avg_throw_dist,
                 ROUND(AVG(CASE WHEN event_type IN (18,19) AND receiver_y IS NOT NULL
@@ -2720,7 +2721,7 @@ def get_player_block_types(player_id: str, year: Optional[int] = None):
                 WHEN SQRT(
                     POWER(COALESCE(prev.receiver_x, prev.turnover_x, prev.thrower_x) - prev.thrower_x, 2) +
                     POWER(COALESCE(prev.receiver_y, prev.turnover_y, prev.thrower_y) - prev.thrower_y, 2)
-                ) >= 30 THEN 'huck'
+                ) >= 40 THEN 'huck'
                 WHEN (COALESCE(prev.receiver_y, prev.turnover_y, prev.thrower_y) - prev.thrower_y) < 2 THEN 'reset'
                 ELSE 'short'
             END AS block_type,
